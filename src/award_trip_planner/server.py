@@ -83,7 +83,9 @@ def create_app(data_dir: Path, api_key: str, award_fetcher=None, cash_fetcher=No
                     st["dropped_by_cap"] = len(fresh_missing) - budget
                     break
                 try:
-                    fetch_cash(q)
+                    fare = fetch_cash(q)
+                    if fare is not None:
+                        cache.put("cash", q.key, fare_to_dict(fare), now=fare.fetched_at)
                 except Exception as e:
                     st["errors"].append(f"cash {q.key}: {e}")
                 st["done"] = i + 1
@@ -98,7 +100,9 @@ def create_app(data_dir: Path, api_key: str, award_fetcher=None, cash_fetcher=No
             st["phase"] = "refine"
             for q in results["refine_requests"]:
                 try:
-                    fetch_cash(q)
+                    fare = fetch_cash(q)
+                    if fare is not None:
+                        cache.put("cash", q.key, fare_to_dict(fare), now=fare.fetched_at)
                 except Exception as e:
                     st["errors"].append(f"refine {q.key}: {e}")
             try:
@@ -156,12 +160,21 @@ def create_app(data_dir: Path, api_key: str, award_fetcher=None, cash_fetcher=No
              "airlines": a.airlines, "updated_at": a.updated_at}
             for a in (cached[0] if cached else [])
         ]
-        cash_matrix = [
-            {"origin": c.origin, "dest": c.dest, "date": c.depart_date, "cabin": c.cabin,
-             "price_pp": round(c.per_person(), 2), "airline": c.airline,
-             "fetched_at": c.fetched_at, "manual": c.manual}
+        cash_matrix_by_key = {
+            (c.origin, c.dest, c.depart_date, c.cabin): {
+                "origin": c.origin, "dest": c.dest, "date": c.depart_date, "cabin": c.cabin,
+                "price_pp": round(c.per_person(), 2), "airline": c.airline,
+                "fetched_at": c.fetched_at, "manual": c.manual}
             for c in all_cash_fares(cfg) if c.kind == "ow"
-        ]
+        }
+        for ov in cache.overrides():
+            key = (ov["origin"], ov["dest"], ov["date"], ov["cabin"])
+            cash_matrix_by_key[key] = {
+                "origin": ov["origin"], "dest": ov["dest"], "date": ov["date"], "cabin": ov["cabin"],
+                "price_pp": ov["price_pp"], "airline": "manual",
+                "fetched_at": time.time(), "manual": True,
+            }
+        cash_matrix = list(cash_matrix_by_key.values())
         queries = plan_phase1(cfg)
         missing = sum(
             1 for q in queries

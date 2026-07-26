@@ -54,7 +54,7 @@
   }
   .card .head { display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; cursor: pointer; }
   .rank { color: var(--muted); font-size: 12px; min-width: 24px; }
-  .money { font-size: 20px; font-weight: 650; }
+  .money { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
   .chip {
     font-size: 12px; color: var(--ink-2); border: 1px solid var(--grid);
     border-radius: 999px; padding: 1px 8px; font-variant-numeric: tabular-nums;
@@ -304,11 +304,13 @@ document.addEventListener("mousemove", (e) => {
   tip.style.top = (e.clientY + 14) + "px";
 });
 
-async function loadResults() {
+async function loadResults(keepStatus = false) {
   RESULTS = await api("/api/results");
   renderCards(); renderHeat(); renderCash();
-  const extra = RESULTS.missing_cash ? ` · ${RESULTS.missing_cash} cash quotes still missing — refresh again` : "";
-  setStatus(`quota ${STATUS?.quota_today ?? "?"}/1000${extra}`);
+  if (!keepStatus) {
+    const extra = RESULTS.missing_cash ? ` · ${RESULTS.missing_cash} cash quotes still missing — refresh again` : "";
+    setStatus(`quota ${STATUS?.quota_today ?? "?"}/1000${extra}`);
+  }
 }
 
 let STATUS = null;
@@ -322,9 +324,10 @@ async function pollStatus() {
     setStatus(`⟳ ${STATUS.phase} ${STATUS.done}/${STATUS.total || "…"}`);
     setTimeout(pollStatus, 800);
   } else {
-    if (STATUS.errors?.length) setStatus(STATUS.errors[STATUS.errors.length - 1], true);
+    const hadError = STATUS.errors?.length > 0;
+    if (hadError) setStatus(STATUS.errors[STATUS.errors.length - 1], true);
     $("#refresh").disabled = false;
-    await loadResults();
+    await loadResults(hadError);
   }
 }
 

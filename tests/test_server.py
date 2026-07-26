@@ -78,3 +78,37 @@ def test_second_refresh_conflicts_while_running(tmp_path):
             break
         time.sleep(0.05)
     assert c.get("/api/status").json()["running"] is False
+
+
+def test_override_appears_in_cash_matrix(tmp_path):
+    c = make_client(tmp_path)
+    c.put("/api/override", json={
+        "origin": "ICN", "dest": "NRT", "date": "2026-10-05", "cabin": "Y", "price_pp": 111.0})
+    rows = c.get("/api/results").json()["cash_matrix"]
+    hit = [r for r in rows
+           if (r["origin"], r["dest"], r["date"], r["cabin"]) == ("ICN", "NRT", "2026-10-05", "Y")]
+    assert len(hit) == 1
+    assert hit[0]["price_pp"] == 111.0
+    assert hit[0]["manual"] is True
+    assert hit[0]["airline"] == "manual"
+
+
+def test_override_replaces_fetched_row(tmp_path):
+    c = make_client(tmp_path)
+    c.post("/api/refresh")
+    for _ in range(200):
+        if not c.get("/api/status").json()["running"]:
+            break
+        time.sleep(0.05)
+    rows = c.get("/api/results").json()["cash_matrix"]
+    assert rows, "expected fetched cash rows after refresh"
+    r0 = rows[0]
+    c.put("/api/override", json={
+        "origin": r0["origin"], "dest": r0["dest"], "date": r0["date"],
+        "cabin": r0["cabin"], "price_pp": 42.0})
+    rows2 = c.get("/api/results").json()["cash_matrix"]
+    key = (r0["origin"], r0["dest"], r0["date"], r0["cabin"])
+    hits = [r for r in rows2 if (r["origin"], r["dest"], r["date"], r["cabin"]) == key]
+    assert len(hits) == 1
+    assert hits[0]["price_pp"] == 42.0 and hits[0]["manual"] is True
+    assert len(rows2) == len(rows)
