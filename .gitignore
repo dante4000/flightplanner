@@ -1,4 +1,6 @@
 .env
 cache.sqlite
+cache.sqlite-shm
+cache.sqlite-wal
 __pycache__/
 .venv/
