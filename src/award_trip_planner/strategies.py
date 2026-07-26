@@ -136,3 +136,248 @@ def stopover_option(t, t1_o, t1_d, t1_date, h_d, h_date, cabin, cfg) -> Option |
         award_seat_legs=((l1, t1.seats), (l2, hop.seats)),
         flags=tuple(flags),
     )
+
+
+# ---------------------------------------------------------------- composition
+
+import dataclasses                          # noqa: E402  (bottom-half imports)
+
+from .cash_client import CashQuery          # noqa: E402
+from .planner import add_days, date_range, hop_pairs, windows  # noqa: E402
+
+PRUNE_CPP = 0.0115          # $/point scalarization used ONLY to prune per-person option lists
+PER_PERSON_KEEP = 8         # options kept per person per skeleton
+SKELETON_KEEP = 3           # return-date candidates kept per shape
+
+
+def _cabins(): return ("Y", "J")
+
+
+def _dates_with_data(t, origins, dests, window, cfg):
+    lo, hi = window
+    seen = set()
+    for (o, d, date, _cabin) in list(t.cash_ow) + list(t.awards):
+        if o in origins and d in dests and lo <= date <= hi:
+            seen.add(date)
+    return sorted(seen)
+
+
+def _person_front_options(t, direction, t1_dest, t1_date, hop, cfg, now):
+    """Options covering T1+H for one person. hop = (h_o, h_d, h_date)."""
+    h_o, h_d, h_date = hop
+    out = []
+    for cab in _cabins():
+        t1_opts = [
+            ow_cash_option(t, "LAX", t1_dest, t1_date, cab, 2, now, cfg),
+            ow_award_option(t, "LAX", t1_dest, t1_date, cab, 1, cfg),
+        ]
+        hop_opts = [
+            ow_cash_option(t, h_o, h_d, h_date, "Y", 2, now, cfg),
+            ow_award_option(t, h_o, h_d, h_date, "Y", 1, cfg),
+            ow_award_option(t, h_o, h_d, h_date, "J", 1, cfg),
+        ]
+        for a in t1_opts:
+            for b in hop_opts:
+                if a and b:
+                    out.append((a, b))
+        if h_o == t1_dest:
+            s = stopover_option(t, "LAX", t1_dest, t1_date, h_d, h_date, cab, cfg)
+            if s:
+                out.append((s,))
+    return out
+
+
+def _person_return_options(t, direction, t1_dest, hop, deadline, hop_date, cfg, now):
+    """Options covering the way home for one person: direct or hopback."""
+    h_o, h_d, h_date = hop
+    earliest = add_days(hop_date, cfg.min_nights_second)
+    out = []
+    second_gateways = cfg.japan_gateways if direction == "KJ" else cfg.korea_gateways
+    first_gateways = cfg.korea_gateways if direction == "KJ" else cfg.japan_gateways
+    ret_dates = [d for d in _dates_with_data(
+        t, set(second_gateways) | set(first_gateways), {"LAX"}, (earliest, deadline), cfg)]
+    for rd in ret_dates[:SKELETON_KEEP * 4]:
+        for g in second_gateways:
+            for cab in _cabins():
+                for opt in (ow_cash_option(t, g, "LAX", rd, cab, 1, now, cfg),
+                            ow_award_option(t, g, "LAX", rd, cab, 1, cfg)):
+                    if opt:
+                        out.append((opt,))
+    # hopback: 2nd -> 1st country cash leg + transpacific from 1st-country gateway
+    back_pairs = hop_pairs(cfg, "JK" if direction == "KJ" else "KJ")
+    for rd in ret_dates:
+        for g in first_gateways:
+            for cab in _cabins():
+                home = (ow_cash_option(t, g, "LAX", rd, cab, 1, now, cfg)
+                        or ow_award_option(t, g, "LAX", rd, cab, 1, cfg))
+                if home is None:
+                    continue
+                for (bo, bd) in back_pairs:
+                    if bd != g:
+                        continue
+                    for bdate in _dates_with_data(t, {bo}, {bd}, (earliest, rd), cfg)[:SKELETON_KEEP]:
+                        back = ow_cash_option(t, bo, bd, bdate, "Y", 1, now, cfg)
+                        if back:
+                            out.append((back, home))
+    # coupled transpacific RT: LAX<->first-gateway (T1 cash + return from 1st country).
+    # Emitted as a marker option pair handled at bundle level via rt_cash_option in
+    # _person_plans (see below) — not generated here.
+    return out
+
+
+def _prune(opts):
+    def cost(chain):
+        return sum(o.cash_pp for o in chain) + PRUNE_CPP * sum(o.points_pp for o in chain)
+    uniq = {}
+    for chain in opts:
+        key = tuple((o.product, o.legs) for o in chain)
+        if key not in uniq or cost(chain) < cost(uniq[key]):
+            uniq[key] = chain
+    return sorted(uniq.values(), key=cost)[:PER_PERSON_KEEP]
+
+
+def _person_plans(t, direction, t1_dest, t1_date, hop, deadline, cfg, now):
+    """All (front_chain, ret_chain) plans for one person, pruned."""
+    plans = []
+    fronts = _prune(_person_front_options(t, direction, t1_dest, t1_date, hop, cfg, now))
+    rets = _prune(_person_return_options(t, direction, t1_dest, hop, deadline, hop[2], cfg, now))
+    for f in fronts:
+        for r in rets:
+            plans.append(f + r)
+    # coupled RT: cash T1 + cash return from first-country gateway as ONE rt product,
+    # combined with a cash/award hop + cash hopback + nothing else transpacific.
+    h_o, h_d, h_date = hop
+    earliest = add_days(hop[2], cfg.min_nights_second)
+    for rd in _dates_with_data(t, {t1_dest}, {"LAX"}, (earliest, deadline), cfg)[:SKELETON_KEEP]:
+        for cab in _cabins():
+            rt = rt_cash_option(t, "LAX", t1_dest, t1_date, rd, cab, 1, cfg, now)
+            if rt is None:
+                continue
+            for back_date in _dates_with_data(t, {h_d}, {t1_dest}, (earliest, rd), cfg)[:SKELETON_KEEP]:
+                back = ow_cash_option(t, h_d, t1_dest, back_date, "Y", 1, now, cfg)
+                hop_opt = ow_cash_option(t, h_o, h_d, h_date, "Y", 2, now, cfg)
+                if back and hop_opt:
+                    plans.append((rt, hop_opt, back))
+    return _prune(plans)
+
+
+def _bundle_from(direction, plan_a, plan_b, cfg):
+    lines, flags, total_cash, total_points = [], set(), 0.0, 0
+    award_users: dict = {}
+    seat_caps: dict = {}
+    for person, chain in (("A", plan_a), ("B", plan_b)):
+        for opt in chain:
+            lines.append(BookingLine(
+                person=person, product=opt.product,
+                legs=[dataclasses.asdict(l) for l in opt.legs],
+                cash_usd=opt.cash_pp, points=opt.points_pp, airline=opt.airline,
+                notes=list(opt.flags),
+            ))
+            total_cash += opt.cash_pp
+            total_points += opt.points_pp
+            flags.update(opt.flags)
+            for leg, seats in opt.award_seat_legs:
+                award_users[leg] = award_users.get(leg, 0) + 1
+                seat_caps[leg] = seats
+    for leg, users in award_users.items():
+        seats = seat_caps[leg]
+        if seats == 0:
+            flags.add("seats-unknown")
+        elif users > seats:
+            return None
+    if total_points > cfg.points_budget:
+        return None
+    summary_bits = []
+    for l in lines:
+        if l.product.startswith("award"):
+            route = "→".join([l.legs[0]["origin"]] + [x["dest"] for x in l.legs])
+            summary_bits.append(f"{l.person}: {route} on points")
+    summary = ("KJ: Korea first" if direction == "KJ" else "JK: Japan first") + (
+        " · " + "; ".join(summary_bits) if summary_bits else " · all cash")
+    return Bundle(
+        direction=direction, total_cash_usd=round(total_cash, 2),
+        total_points=total_points, cpp=None, lines=lines,
+        flags=sorted(flags), summary=summary,
+    )
+
+
+def _is_transpac(leg: dict) -> bool:
+    return "LAX" in (leg["origin"], leg["dest"])
+
+
+def _view_of(bundle_dict) -> str:
+    cabins = {leg["cabin"] for line in bundle_dict["lines"] for leg in line["legs"] if _is_transpac(leg)}
+    if cabins == {"Y"}:
+        return "economy"
+    if cabins == {"J"}:
+        return "business"
+    return "other"
+
+
+def compute(award_fares, cash_fares, overrides, cfg: Config, now: float | None = None) -> dict:
+    now = time.time() if now is None else now
+    t = build_tables(award_fares, cash_fares, overrides, cfg)
+    w = windows(cfg)
+    bundles: list[Bundle] = []
+    for direction in ("KJ", "JK"):
+        first_gw = cfg.korea_gateways if direction == "KJ" else cfg.japan_gateways
+        t1_dates = _dates_with_data(t, {"LAX"}, set(first_gw), w["t1"], cfg)
+        for t1_dest in first_gw:
+            for t1_date in t1_dates:
+                hop_earliest = add_days(t1_date, 1 + cfg.min_nights_first)
+                for (h_o, h_d) in hop_pairs(cfg, direction):
+                    for h_date in _dates_with_data(t, {h_o}, {h_d}, (hop_earliest, w["hop"][1]), cfg):
+                        hop = (h_o, h_d, h_date)
+                        plans_a = _person_plans(t, direction, t1_dest, t1_date, hop,
+                                                cfg.return_a_deadline, cfg, now)
+                        plans_b = _person_plans(t, direction, t1_dest, t1_date, hop,
+                                                cfg.return_b_deadline, cfg, now)
+                        for pa in plans_a:
+                            for pb in plans_b:
+                                b = _bundle_from(direction, pa, pb, cfg)
+                                if b:
+                                    bundles.append(b)
+    ranked = sorted(bundles, key=lambda b: b.total_cash_usd)
+    # classify once against a throwaway dict (kept separate from the copies we
+    # actually emit below, so per-view cpp mutations never leak across views)
+    classified = [(b, _view_of(b.to_dict())) for b in ranked]
+
+    def _build_view(name: str) -> list:
+        if name == "mixed":
+            cands = [b for b, _ in classified]
+        else:
+            cands = [b for b, v in classified if v == name]
+        capped = cands[: cfg.top_n]
+        # guarantee the all-cash baseline (total_points == 0) is present in the
+        # view whenever one exists for it, even if it's outside the cheapest
+        # top_n by cash (points-heavy plans are usually cheaper in cash terms).
+        if not any(b.total_points == 0 for b in capped):
+            baseline_b = next((b for b in cands if b.total_points == 0), None)
+            if baseline_b is not None:
+                capped = (capped[:-1] if capped else []) + [baseline_b]
+        capped = sorted(capped, key=lambda b: b.total_cash_usd)
+        return [b.to_dict() for b in capped]
+
+    views: dict[str, list] = {name: _build_view(name) for name in ("mixed", "economy", "business")}
+    for view in views.values():
+        baseline = next((b["total_cash_usd"] for b in view if b["total_points"] == 0), None)
+        for b in view:
+            if b["total_points"] and baseline is not None:
+                b["cpp"] = round(100 * (baseline - b["total_cash_usd"]) / b["total_points"], 2)
+    refine, seen = [], set()
+    for b in views["mixed"][:10]:
+        for line in b["lines"]:
+            if line["product"] == "cash_rt" and "rt-estimated-from-oneways" in line["notes"]:
+                out_leg, back_leg = line["legs"][0], line["legs"][1]
+                key = (out_leg["origin"], out_leg["dest"], out_leg["date"], back_leg["date"], out_leg["cabin"])
+                if key not in seen:
+                    seen.add(key)
+                    refine.append(CashQuery(
+                        kind="rt", origin=key[0], dest=key[1], depart_date=key[2],
+                        return_date=key[3], cabin=key[4], adults=1, priority=0,
+                    ))
+    return {
+        "views": views,
+        "refine_requests": refine[: cfg.refine_query_cap],
+        "generated_at": now,
+    }
