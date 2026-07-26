@@ -294,6 +294,26 @@ def _bundle_from(direction, plan_a, plan_b, cfg):
             summary_bits.append(f"{l.person}: {route} on points")
     summary = ("KJ: Korea first" if direction == "KJ" else "JK: Japan first") + (
         " · " + "; ".join(summary_bits) if summary_bits else " · all cash")
+
+    date_bits = []
+    out_date = next((leg["date"] for l in lines for leg in l.legs if leg["origin"] == "LAX"), None)
+    if out_date:
+        date_bits.append(f"out {out_date}")
+    hop_date = next((leg["date"] for l in lines for leg in l.legs
+                      if leg["origin"] != "LAX" and leg["dest"] != "LAX"), None)
+    if hop_date:
+        date_bits.append(f"hop {hop_date}")
+    home_by_person: dict = {}
+    for l in lines:
+        for leg in l.legs:
+            if leg["dest"] == "LAX":
+                home_by_person[l.person] = leg["date"]
+    home_a, home_b = home_by_person.get("A"), home_by_person.get("B")
+    if home_a or home_b:
+        date_bits.append(f"home {home_a or '?'}/{home_b or '?'}")
+    if date_bits:
+        summary += " · " + ", ".join(date_bits)
+
     return Bundle(
         direction=direction, total_cash_usd=round(total_cash, 2),
         total_points=total_points, cpp=None, lines=lines,
@@ -303,6 +323,34 @@ def _bundle_from(direction, plan_a, plan_b, cfg):
 
 def _is_transpac(leg: dict) -> bool:
     return "LAX" in (leg["origin"], leg["dest"])
+
+
+def _shape_signature(bundle_dict, cfg: Config | None = None) -> tuple:
+    """Signature that ignores dates but keeps routing + payment structure, so that
+    date-permutation duplicates of the same underlying strategy collapse together.
+
+    Airport codes within the same country group (e.g. NRT/HND/KIX in Japan, or
+    ICN/GMP in Korea) are normalized to a single tag when `cfg` is supplied. Real
+    data showed that leaving raw airport codes in the signature was still too
+    granular: the SAME abstract strategy (cash front + hop, points home) recurred
+    over and over differing only in which physical gateway/hop airport was used,
+    which is logistics noise rather than a genuinely different strategy — it
+    crowded the ranked list exactly like the date-permutation duplicates did.
+    """
+    def region(code: str) -> str:
+        if cfg is None:
+            return code
+        if code in cfg.korea_airports:
+            return "KR"
+        if code in cfg.japan_airports:
+            return "JP"
+        return code
+
+    return (bundle_dict["direction"],) + tuple(
+        (line["person"], line["product"],
+         tuple((region(leg["origin"]), region(leg["dest"]), leg["cabin"]) for leg in line["legs"]))
+        for line in bundle_dict["lines"]
+    )
 
 
 def _view_of(bundle_dict) -> str:
@@ -338,6 +386,17 @@ def compute(award_fares, cash_fares, overrides, cfg: Config, now: float | None =
                                 if b:
                                     bundles.append(b)
     ranked = sorted(bundles, key=lambda b: b.total_cash_usd)
+    # collapse date-permutation duplicates of the same strategy shape, keeping only
+    # the cheapest (tie-break: fewest points) representative of each shape, BEFORE
+    # per-view filtering/capping — otherwise a single cheap shape's date variants
+    # crowd out genuinely different strategies from the top of every view.
+    best_by_shape: dict[tuple, Bundle] = {}
+    for b in ranked:
+        sig = _shape_signature(b.to_dict(), cfg)
+        cur = best_by_shape.get(sig)
+        if cur is None or (b.total_cash_usd, b.total_points) < (cur.total_cash_usd, cur.total_points):
+            best_by_shape[sig] = b
+    ranked = sorted(best_by_shape.values(), key=lambda b: b.total_cash_usd)
     # classify once against a throwaway dict (kept separate from the copies we
     # actually emit below, so per-view cpp mutations never leak across views)
     classified = [(b, _view_of(b.to_dict())) for b in ranked]

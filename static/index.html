@@ -337,7 +337,11 @@ $("#refresh").onclick = async () => {
   pollStatus();
 };
 
-(async () => { await loadConfig(); await loadResults().catch(() => setStatus("no data yet — hit Refresh")); })();
+(async () => {
+  await loadConfig();
+  try { STATUS = await api("/api/status"); } catch (e) {}
+  await loadResults().catch(() => setStatus("no data yet — hit Refresh"));
+})();
 </script>
 </body>
 </html>

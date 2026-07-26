@@ -102,3 +102,22 @@ def test_ranked_ascending_and_capped():
         costs = [b["total_cash_usd"] for b in view]
         assert costs == sorted(costs)
         assert len(view) <= CFG.top_n
+
+
+def test_distinct_shapes_in_views():
+    r = result()
+    for name, view in r["views"].items():
+        sigs = [
+            tuple([b["direction"]] + [
+                (l["person"], l["product"],
+                 tuple((leg["origin"], leg["dest"], leg["cabin"]) for leg in l["legs"]))
+                for l in b["lines"]])
+            for b in view
+        ]
+        assert len(sigs) == len(set(sigs)), f"{name} view has duplicate strategy shapes"
+
+
+def test_summary_includes_dates():
+    r = result()
+    for b in r["views"]["mixed"]:
+        assert "out 2026-" in b["summary"], b["summary"]
