@@ -84,3 +84,15 @@ def test_stopover():
     assert min(n for _, n in s.award_seat_legs) == 2
     assert "stopover-verify-on-aeroplan" in s.flags
     assert stopover_option(t, "LAX", "ICN", "2026-10-01", "NRT", "2026-10-06", "Y", CFG) is None
+
+
+def test_rt_estimate_propagates_staleness():
+    stale = 1000.0
+    t2 = tables(cash=[
+        ca("LAX", "ICN", "2026-10-01", "Y", 700.0, adults=1, fetched=stale),
+        ca("ICN", "LAX", "2026-10-12", "Y", 700.0, adults=1, fetched=stale),
+    ])
+    est = rt_cash_option(t2, "LAX", "ICN", "2026-10-01", "2026-10-12", "Y", 1, CFG,
+                         now=stale + CFG.cash_ttl_hours * 3600 + 1)
+    assert "rt-estimated-from-oneways" in est.flags
+    assert "stale-cash" in est.flags

@@ -104,7 +104,9 @@ def rt_cash_option(t, o, d, dep, ret, cabin, adults, cfg, now) -> Option | None:
         product="cash_rt", legs=legs,
         cash_pp=round(out.per_person() + back.per_person(), 2), points_pp=0,
         airline=f"{out.airline} / {back.airline}",
-        flags=("rt-estimated-from-oneways",),
+        flags=tuple(dict.fromkeys(
+            ("rt-estimated-from-oneways",)
+            + _staleness_flags(out, cfg, now) + _staleness_flags(back, cfg, now))),
     )
 
 
