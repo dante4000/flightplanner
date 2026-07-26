@@ -1,0 +1,35 @@
+{
+  "data": [
+    {
+      "ID": "id_lax_icn",
+      "Route": {"OriginAirport": "LAX", "DestinationAirport": "ICN", "Source": "aeroplan", "Distance": 5987},
+      "Date": "2026-10-01",
+      "YAvailableRaw": true, "JAvailableRaw": true,
+      "YMileageCostRaw": 55000, "JMileageCostRaw": 85000,
+      "YTotalTaxesRaw": 0, "JTotalTaxesRaw": 11550,
+      "TaxesCurrency": "CAD",
+      "YRemainingSeatsRaw": 4, "JRemainingSeatsRaw": 2,
+      "YDirectRaw": true, "JDirectRaw": false,
+      "YAirlinesRaw": "AC", "JAirlinesRaw": "AC, NH",
+      "Source": "aeroplan",
+      "UpdatedAt": "2026-07-25T10:00:00Z"
+    },
+    {
+      "ID": "id_icn_nrt",
+      "Route": {"OriginAirport": "ICN", "DestinationAirport": "NRT", "Source": "aeroplan", "Distance": 758},
+      "Date": "2026-10-05",
+      "YAvailableRaw": false, "JAvailableRaw": true,
+      "YMileageCostRaw": 0, "JMileageCostRaw": 52500,
+      "YTotalTaxesRaw": 0, "JTotalTaxesRaw": 0,
+      "TaxesCurrency": "CAD",
+      "YRemainingSeatsRaw": 0, "JRemainingSeatsRaw": 1,
+      "YDirectRaw": false, "JDirectRaw": true,
+      "YAirlinesRaw": "", "JAirlinesRaw": "NH",
+      "Source": "aeroplan",
+      "UpdatedAt": "2026-07-25T11:00:00Z"
+    }
+  ],
+  "count": 3,
+  "hasMore": true,
+  "cursor": "cursor123"
+}

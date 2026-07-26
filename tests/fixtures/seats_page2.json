@@ -1,0 +1,21 @@
+{
+  "data": [
+    {
+      "ID": "id_nrt_lax",
+      "Route": {"OriginAirport": "NRT", "DestinationAirport": "LAX", "Source": "aeroplan", "Distance": 5444},
+      "Date": "2026-10-12",
+      "YAvailableRaw": true, "JAvailableRaw": false,
+      "YMileageCostRaw": 55000, "JMileageCostRaw": 0,
+      "YTotalTaxesRaw": 6000, "JTotalTaxesRaw": 0,
+      "TaxesCurrency": "CAD",
+      "YRemainingSeatsRaw": 9, "JRemainingSeatsRaw": 0,
+      "YDirectRaw": true, "JDirectRaw": false,
+      "YAirlinesRaw": "NH", "JAirlinesRaw": "",
+      "Source": "aeroplan",
+      "UpdatedAt": "2026-07-25T12:00:00Z"
+    }
+  ],
+  "count": 3,
+  "hasMore": false,
+  "cursor": ""
+}
