@@ -54,3 +54,36 @@ def test_patch_installs():
     assert P.parse_js.__name__ == "tolerant_parse_js"
     gflights_patch.install()  # idempotent
     assert P.parse_js.__name__ == "tolerant_parse_js"
+
+
+def _mk_payload():
+    sf = [None] * 22
+    sf[3], sf[4] = "ICN", "Incheon"
+    sf[5], sf[6] = "Narita", "NRT"
+    sf[8], sf[10] = [9, 0], [11, 15]
+    sf[11], sf[17] = 135, "789"
+    sf[20], sf[21] = [2026, 10, 1], [2026, 10, 1]
+    flight = [None] * 23
+    flight[0], flight[1], flight[2] = "ZG", ["ZIPAIR Tokyo"], [sf]
+    flight[22] = [None] * 9
+    flight[22][7], flight[22][8] = 100, 90
+    good = [flight, [[None, 294]]]
+    bad = [flight, [[]]]  # unpriced row -> must be skipped, not crash
+    payload = [None] * 8
+    payload[3] = [[good, bad]]
+    payload[7] = [None, [[["STAR_ALLIANCE", "Star Alliance"]], [["ZG", "ZIPAIR"]]]]
+    return payload
+
+
+def test_tolerant_parser_skips_unpriced_rows():
+    import json
+
+    from award_trip_planner.gflights_patch import tolerant_parse_js
+
+    js = "data:" + json.dumps(_mk_payload()) + ", sideChannel: {}})"
+    res = tolerant_parse_js(js)
+    assert len(res) == 1
+    f = res[0]
+    assert f.price == 294 and f.airlines == ["ZIPAIR Tokyo"]
+    sg = f.flights[0]
+    assert (sg.from_airport.code, sg.to_airport.code) == ("ICN", "NRT")
