@@ -57,8 +57,8 @@ def create_app(data_dir: Path, api_key: str, award_fetcher=None, cash_fetcher=No
         return fares
 
     def run_refresh():
-        st, cfg = state["status"], state["cfg"]
         try:
+            st, cfg = state["status"], state["cfg"]
             st.update(running=True, errors=[], dropped_by_cap=0, phase="awards")
             row = cache.get_stale("awards", "all")
             if row is None or time.time() - row[1] > cfg.award_ttl_hours * 3600:
@@ -89,7 +89,11 @@ def create_app(data_dir: Path, api_key: str, award_fetcher=None, cash_fetcher=No
                 st["done"] = i + 1
 
             st["phase"] = "compute"
-            results = compute_now()
+            try:
+                results = compute_now()
+            except Exception as e:
+                st["errors"].append(f"compute: {e}")
+                results = {"refine_requests": []}
 
             st["phase"] = "refine"
             for q in results["refine_requests"]:
@@ -97,11 +101,14 @@ def create_app(data_dir: Path, api_key: str, award_fetcher=None, cash_fetcher=No
                     fetch_cash(q)
                 except Exception as e:
                     st["errors"].append(f"refine {q.key}: {e}")
-            compute_now()
+            try:
+                compute_now()
+            except Exception as e:
+                st["errors"].append(f"compute: {e}")
             st["last_refresh"] = time.time()
         finally:
-            st["quota_today"] = cache.quota(seats_client.today_utc())
-            st.update(running=False, phase="idle")
+            state["status"]["quota_today"] = cache.quota(seats_client.today_utc())
+            state["status"].update(running=False, phase="idle")
 
     def compute_now() -> dict:
         cfg = state["cfg"]
@@ -129,6 +136,7 @@ def create_app(data_dir: Path, api_key: str, award_fetcher=None, cash_fetcher=No
     def refresh():
         if state["status"]["running"]:
             raise HTTPException(409, "refresh already running")
+        state["status"]["running"] = True
         threading.Thread(target=run_refresh, daemon=True).start()
         return {"started": True}
 

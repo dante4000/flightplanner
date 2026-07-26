@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -33,7 +34,6 @@ def test_refresh_and_results(tmp_path):
     c = make_client(tmp_path)
     assert c.post("/api/refresh").json()["started"] is True
     # TestClient runs the thread; poll status until idle
-    import time
     for _ in range(200):
         s = c.get("/api/status").json()
         if not s["running"]:
@@ -56,7 +56,25 @@ def test_override_endpoint(tmp_path):
 
 
 def test_second_refresh_conflicts_while_running(tmp_path):
-    # guarded by the running flag; with fake fetchers refresh is fast, so just
-    # assert the endpoint contract on the idle path
-    c = make_client(tmp_path)
-    assert c.post("/api/refresh").status_code == 200
+    import threading as _t
+
+    release = _t.Event()
+    entered = _t.Event()
+
+    def slow_cash_fetcher(q, **kw):
+        entered.set()
+        release.wait(5)
+        return fake_cash_fetcher(q, **kw)
+
+    app = create_app(tmp_path, "test_key",
+                     award_fetcher=fake_award_fetcher, cash_fetcher=slow_cash_fetcher)
+    c = TestClient(app)
+    assert c.post("/api/refresh").json()["started"] is True
+    assert entered.wait(5), "refresh thread never started fetching"
+    assert c.post("/api/refresh").status_code == 409
+    release.set()
+    for _ in range(200):
+        if not c.get("/api/status").json()["running"]:
+            break
+        time.sleep(0.05)
+    assert c.get("/api/status").json()["running"] is False
