@@ -60,8 +60,13 @@ exactly why naive per-leg pricing is wrong:
    return, which then departs City1 and requires their Hx hop-back), or
    City1↔City2 (covers H + Hx for one person). Together these express the
    classic "RT to Korea + RT Korea↔Japan" shape.
-3. **Cash open-jaw (multi-city)** — LAX→City1 + City2→LAX priced as one
-   ticket per person. Usually beats two one-ways; the default cash shape.
+3. ~~Cash open-jaw (multi-city)~~ — **dropped after live verification
+   (2026-07-26):** Google Flights' multi-city page returns no priced
+   itineraries in its initial payload (it requires interactive leg-by-leg
+   selection), so single-ticket open-jaw quotes are unobtainable via
+   `fast-flights`. Direct-return shapes are priced as **sum of one-ways**
+   (bookable as separate tickets); the UI notes that a true open-jaw ticket
+   on the top bundle's carrier may price better and is worth a manual check.
 4. **Aeroplan one-way award** — any leg; Aeroplan prices one-ways at half a
    round trip, so awards are composed per-leg with no RT coupling.
 5. **Aeroplan stopover award** — LAX→City1 (stopover ≤45 days) →City2 booked
@@ -114,11 +119,16 @@ Pure functions: `(award_table, cash_table, config) → ranked bundles`. No I/O.
 ### Google Flights via `fast-flights` (cash)
 
 - Free, no key; queries Google Flights' internal protobuf API. **Risk: can
-  break without notice.** Verified working at implementation start; wrapped so
-  a breakage degrades to manual price entry (UI input per leg) instead of
-  taking down the dashboard.
-- Query shapes: one-ways per leg; open-jaw via multi-city (LAX→C1, C2→LAX);
-  RTs where the RT template applies. Adults=2 on shared legs, 1 on returns.
+  break without notice.** Live-verified 2026-07-26: pinned `fast-flights==3.0.2`
+  whose stock parser crashes on rows without prices (e.g. ICN→NRT) — we vendor
+  a row-tolerant copy of `parse_js` (skips unpriced rows, best-effort metadata,
+  reads both the "best" and "other" itinerary blocks) and monkeypatch it in.
+  Any remaining breakage degrades to manual price entry (UI input per leg)
+  instead of taking down the dashboard.
+- Query shapes: one-ways per leg; round-trips where the RT templates apply
+  (verified parsing). Prices returned are **totals for the queried passenger
+  count** (verified: adults=2 = 2 × adults=1). Adults=2 on shared legs, 1 on
+  per-person returns.
 - Cost control: coarse grid first (every 2–3 days across each window), refine
   ±1 day around minima; hard cap ~60 queries per refresh; SQLite cache with
   6-hour TTL so repeat refreshes are mostly free.
