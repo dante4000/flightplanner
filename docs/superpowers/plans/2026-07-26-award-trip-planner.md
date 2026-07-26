@@ -1938,6 +1938,7 @@ from fastapi.responses import FileResponse
 from . import cash_client, seats_client, strategies
 from .cache import Cache
 from .config import Config
+from .models import cash_from_dict, fare_to_dict
 from .planner import plan_phase1, windows
 
 STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
@@ -1980,7 +1981,6 @@ def create_app(data_dir: Path, api_key: str, award_fetcher=None, cash_fetcher=No
         for key in cache.keys("cash"):
             row = cache.get_stale("cash", key)
             if row and row[0] and not row[0].get("failed"):
-                from .models import cash_from_dict
                 fares.append(cash_from_dict(row[0]))
         return fares
 
@@ -1991,7 +1991,8 @@ def create_app(data_dir: Path, api_key: str, award_fetcher=None, cash_fetcher=No
             row = cache.get_stale("awards", "all")
             if row is None or time.time() - row[1] > cfg.award_ttl_hours * 3600:
                 try:
-                    fetch_awards()
+                    fares = fetch_awards()
+                    cache.put("awards", "all", [fare_to_dict(f) for f in fares])
                 except Exception as e:
                     st["errors"].append(f"awards: {e}")
             arow = cache.get_stale("awards", "all")
@@ -2049,6 +2050,7 @@ def create_app(data_dir: Path, api_key: str, award_fetcher=None, cash_fetcher=No
         names = {f.name for f in dc_fields(Config)}
         state["cfg"] = Config(**{k: v for k, v in merged.items() if k in names})
         state["cfg"].save(cfg_path)
+        state.pop("results", None)
         return state["cfg"].to_dict()
 
     @app.post("/api/refresh")
