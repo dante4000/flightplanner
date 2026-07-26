@@ -60,6 +60,7 @@
     border-radius: 999px; padding: 1px 8px; font-variant-numeric: tabular-nums;
   }
   .chip.save { color: var(--good-text); border-color: var(--good-text); }
+  .chip.worse { color: #d03b3b; border-color: #d03b3b; }
   .summary { color: var(--ink-2); font-size: 13px; flex: 1 1 100%; }
   table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
   th, td { border-bottom: 1px solid var(--grid); padding: 4px 8px; text-align: left; font-size: 13px; }
@@ -189,7 +190,9 @@ function renderCards() {
     card.className = "card";
     const chips = [];
     if (b.total_points) chips.push(`<span class="chip">${fmtPts(b.total_points)}</span>`);
-    if (b.cpp != null) chips.push(`<span class="chip save">${b.cpp}¢/pt</span>`);
+    if (b.cpp != null) chips.push(b.cpp > 0
+      ? `<span class="chip save">${b.cpp}¢/pt</span>`
+      : `<span class="chip worse">${b.cpp}¢/pt — costs more than paying cash</span>`);
     if (!b.total_points) chips.push(`<span class="chip">all cash</span>`);
     card.innerHTML = `
       <div class="head">
