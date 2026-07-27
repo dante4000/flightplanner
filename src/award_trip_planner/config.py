@@ -33,6 +33,10 @@ class Config:
     cash_ttl_hours: float = 6.0
     award_ttl_hours: float = 24.0
     top_n: int = 15
+    date_grid_step_days: int = 1
+    max_date_paths: int = 20_000
+    max_options_per_segment: int = 8
+    max_shapes: int = 4_000
 
     def to_dict(self) -> dict:
         return asdict(self)
