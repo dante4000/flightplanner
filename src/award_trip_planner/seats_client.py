@@ -50,6 +50,11 @@ def _map_entry(a: dict, cfg: Config) -> list[AwardFare]:
 
 RATE_LIMIT_RETRIES = 4
 RATE_LIMIT_BACKOFF_S = 20.0
+DAILY_QUOTA = 1000
+
+
+class QuotaExhausted(RuntimeError):
+    """The seats.aero daily call budget is spent; retrying today cannot help."""
 
 
 def _get_with_backoff(client, params, cache, sleep=None):
@@ -63,6 +68,13 @@ def _get_with_backoff(client, params, cache, sleep=None):
     sleep = sleep or time.sleep
     delay = RATE_LIMIT_BACKOFF_S
     for attempt in range(RATE_LIMIT_RETRIES + 1):
+        # Check before spending, not after. Retries count too — a backoff loop
+        # against an exhausted quota just burns the next day's headroom.
+        used = cache.quota(today_utc())
+        if used >= DAILY_QUOTA:
+            raise QuotaExhausted(
+                f"seats.aero daily quota spent ({used}/{DAILY_QUOTA}); "
+                "it resets at 00:00 UTC. Cached data is still usable.")
         resp = client.get(f"{BASE}/search", params=params)
         cache.bump_quota(today_utc())
         if resp.status_code != 429 or attempt == RATE_LIMIT_RETRIES:

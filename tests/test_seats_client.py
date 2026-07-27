@@ -112,3 +112,24 @@ def test_rate_limit_is_retried_with_backoff(tmp_path):
     # both attempts counted against the daily quota, because the server counted them
     from award_trip_planner.seats_client import today_utc
     assert cache.quota(today_utc()) == 2
+
+
+def test_quota_guard_stops_before_exceeding_the_daily_budget(tmp_path):
+    from award_trip_planner.seats_client import DAILY_QUOTA, QuotaExhausted, today_utc
+
+    cache = Cache(tmp_path / "c.sqlite")
+    for _ in range(DAILY_QUOTA):
+        cache.bump_quota(today_utc())
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(200, json={"data": [], "count": 0, "hasMore": False})
+
+    try:
+        fetch_awards("test_key", [(["LAX"], ["ICN"])], "2026-09-25", "2026-10-31",
+                     cache, Config(), transport=httpx.MockTransport(handler))
+        raise AssertionError("expected QuotaExhausted")
+    except QuotaExhausted as e:
+        assert "resets at 00:00 UTC" in str(e)
+    assert calls == [], "no HTTP call may be made once the quota is spent"
