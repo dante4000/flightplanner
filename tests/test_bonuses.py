@@ -88,3 +88,29 @@ def test_manual_delete_and_lookup(tmp_path):
     assert look("amex_mr", "aeroplan") == 0.30
     assert look("chase_ur", "aeroplan") == 0.0
     assert look("amex_mr", "singapore") == 0.0
+
+
+def test_corrupt_cache_rows_are_skipped_not_raised(tmp_path):
+    cache = Cache(tmp_path / "c.sqlite")
+    # a row written by a future/older schema, plus one good row
+    cache.put("bonuses", "manual", [
+        {"currency": "amex_mr", "program": "aeroplan", "pct": 0.2,
+         "expires": None, "source": "manual"},
+        {"currency": "amex_mr", "program": "singapore", "pct": 0.4,
+         "expires": None, "source": "manual", "unexpected_new_field": 1},
+    ])
+    got = manual_bonuses(cache)
+    assert [(b.program, b.pct) for b in got] == [("aeroplan", 0.2)]
+
+    bonuses, notes = active_bonuses(cache, today="2026-07-26",
+                                    fetcher=lambda: HTML, now=1000.0)
+    assert ("amex_mr", "aeroplan") in {(b.currency, b.program) for b in bonuses}
+
+
+def test_zero_parsed_rows_emits_a_note(tmp_path):
+    cache = Cache(tmp_path / "c.sqlite")
+    bonuses, notes = active_bonuses(cache, today="2026-07-26",
+                                    fetcher=lambda: "<html>no tables here</html>",
+                                    now=1000.0)
+    assert bonuses == []
+    assert any("no parsable rows" in n for n in notes)

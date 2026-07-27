@@ -113,9 +113,25 @@ def set_manual_bonus(cache: Cache, currency: str, program: str,
     cache.put(CACHE_NS, MANUAL_KEY, [asdict(b) for b in rows.values()])
 
 
+def _rows_to_bonuses(rows) -> list[Bonus]:
+    """Rebuild Bonus objects from cached JSON, skipping anything malformed.
+
+    Cached rows outlive the code that wrote them, so a later field change or a
+    corrupted row must not raise out of the bonus layer — it degrades to
+    "no bonus", which only ever costs points, never invents a discount.
+    """
+    out = []
+    for d in rows or []:
+        try:
+            out.append(Bonus(**d))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def manual_bonuses(cache: Cache) -> list[Bonus]:
     row = cache.get_stale(CACHE_NS, MANUAL_KEY)
-    return [Bonus(**d) for d in row[0]] if row else []
+    return _rows_to_bonuses(row[0]) if row else []
 
 
 def _not_expired(b: Bonus, today: str) -> bool:
@@ -130,13 +146,20 @@ def active_bonuses(
     notes: list[str] = []
     scraped: list[Bonus] = []
 
-    cached = cache.get(CACHE_NS, CACHE_KEY, max_age_s=ttl_hours * 3600, now=now)
+    try:
+        cached = cache.get(CACHE_NS, CACHE_KEY, max_age_s=ttl_hours * 3600, now=now)
+    except Exception as e:
+        cached = None
+        notes.append(f"transfer-bonus cache unreadable ({e}); refetching")
     if cached is not None:
-        scraped = [Bonus(**d) for d in cached]
+        scraped = _rows_to_bonuses(cached)
     else:
         try:
             html = (fetcher or _default_fetcher)()
             scraped = parse_bonus_rows(html)
+            if not scraped:
+                notes.append("transfer-bonus source returned no parsable rows; "
+                             "manual entries are the only bonuses in effect")
             cache.put(CACHE_NS, CACHE_KEY, [asdict(b) for b in scraped], now=now)
         except Exception as e:
             notes.append(f"transfer-bonus scrape failed ({e}); using manual entries only")
