@@ -6,6 +6,15 @@ from dataclasses import asdict, dataclass
 
 from .cache import Cache
 
+# Scraping status, verified live 2026-07-26. Two independent blockers:
+#   1. httpx gets 403 even with browser headers and redirects followed, while
+#      curl with the same URL/UA gets 200 — i.e. TLS-fingerprint bot protection,
+#      not something a header can fix.
+#   2. Fetched via curl, the page publishes bonuses in prose and article titles,
+#      not a table, so `parse_bonus_rows` finds 0 rows in it anyway.
+# The parser is correct for a table-shaped tracker and TRACKER_URL is swappable.
+# Until a structured source is wired up, MANUAL ENTRY IS THE WORKING PATH; the
+# scrape is best-effort and its failure is a note, never an exception.
 TRACKER_URL = "https://frequentmiler.com/transfer-bonuses/"
 CACHE_NS = "bonuses"
 CACHE_KEY = "scrape"
@@ -79,7 +88,17 @@ def parse_bonus_rows(html: str) -> list[Bonus]:
 def _default_fetcher() -> str:
     import httpx
 
-    resp = httpx.get(TRACKER_URL, timeout=20.0, headers={"user-agent": "award-trip-planner"})
+    # follow_redirects: the tracker URL 301s, and httpx does not follow by default.
+    # A browser user-agent is required too; the default one gets a 403.
+    resp = httpx.get(
+        TRACKER_URL,
+        timeout=20.0,
+        follow_redirects=True,
+        headers={"user-agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/126 Safari/537.36"
+        )},
+    )
     resp.raise_for_status()
     return resp.text
 
