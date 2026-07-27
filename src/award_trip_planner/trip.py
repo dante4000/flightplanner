@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass, field
-from itertools import product
+from dataclasses import dataclass
 
 # Airports we price. Region drives the date-line offset only.
 _REGIONS: dict[str, str] = {
