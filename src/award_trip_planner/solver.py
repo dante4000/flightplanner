@@ -111,7 +111,15 @@ def _shape_labels(shape: tuple) -> list[str]:
 
 
 def solve(trip: Trip, tables, balances: dict, bonuses: list, cfg: Config,
-          now: float | None = None, top_n: int = 15) -> SolveResult:
+          now: float | None = None, top_n: int = 15, sort: str = "cash") -> SolveResult:
+    """Rank trip strategies.
+
+    `sort="cash"` (default) orders by total cash out-of-pocket ascending: the
+    "what do I actually pay" view. `sort="value"` orders by redemption quality
+    (cents per point) instead, which surfaces the most efficient use of a
+    limited points balance even when a cash-cheaper option exists that burns
+    far more points. Both are legitimate questions; they are not the same one.
+    """
     now = time.time() if now is None else now
     res = SolveResult()
     trip.validate()
@@ -191,7 +199,10 @@ def solve(trip: Trip, tables, balances: dict, bonuses: list, cfg: Config,
             dates=path,
         ).to_dict())
 
-    bundles.sort(key=_bundle_rank_key)
+    if sort == "value":
+        bundles.sort(key=_bundle_rank_key)
+    else:
+        bundles.sort(key=lambda b: b["total_cash_usd"])
     res.bundles = bundles[:top_n]
     res.award_matrix = _award_matrix(tables, balances, lookup, trip.party_size)
     return res

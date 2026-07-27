@@ -38,10 +38,11 @@ AWARDS = [
 RICH = {"amex_mr": 500_000, "chase_ur": 0, "aeroplan_fixed": 100_000}
 
 
-def run(balances=None, bonuses=(), trip=TRIP, awards=None, cash=None, top_n=15):
+def run(balances=None, bonuses=(), trip=TRIP, awards=None, cash=None, top_n=15,
+        sort="cash"):
     tables = build_tables(list(awards or AWARDS), list(cash or CASH), [], CFG)
     return solve(trip, tables, balances or RICH, list(bonuses), CFG,
-                 now=1_000_000.0, top_n=top_n)
+                 now=1_000_000.0, top_n=top_n, sort=sort)
 
 
 def test_all_cash_baseline():
@@ -52,14 +53,27 @@ def test_all_cash_baseline():
     assert base[0]["cpp"] is None
 
 
-def test_best_bundle_uses_points_on_the_priciest_leg():
+def test_cash_sort_puts_the_cheapest_trip_first():
+    """Default sort answers 'what do I pay' — using both awards is cash-cheapest."""
     r = run()
     best = r.bundles[0]
-    # cheapest: cash LAX-ICN 600 + cash hop 100 + aeroplan NRT-LAX (40 + fee)
+    # both awards: VS taxes (30+fee) + cash hop 100 + aeroplan (40+fee)
+    assert best["total_cash_usd"] == round((30.0 + FEE) + 100.0 + (40.0 + FEE), 2)
+    assert [s["kind"] for s in best["segments"]] == ["award", "cash", "award"]
+    costs = [b["total_cash_usd"] for b in r.bundles]
+    assert costs == sorted(costs)
+
+
+def test_value_sort_prefers_the_better_redemption():
+    """`sort='value'` answers 'where do my points work hardest' instead."""
+    r = run(sort="value")
+    best = r.bundles[0]
+    # aeroplan on the priciest leg: 600 + 100 + (40 + fee), 50k points, best cpp
     assert best["total_cash_usd"] == round(600.0 + 100.0 + 40.0 + FEE, 2)
-    seg_kinds = [s["kind"] for s in best["segments"]]
-    assert seg_kinds == ["cash", "cash", "award"]
+    assert [s["kind"] for s in best["segments"]] == ["cash", "cash", "award"]
     assert best["segments"][2]["program"] == "aeroplan"
+    cpps = [b["cpp"] for b in r.bundles if b["cpp"] is not None and b["cpp"] > 0]
+    assert cpps == sorted(cpps, reverse=True)
 
 
 def test_dates_chain_and_respect_night_bounds():
@@ -90,10 +104,20 @@ def test_insufficient_balance_rejects_the_bundle():
 def test_bonus_reduces_points_drawn():
     r = run(balances={"amex_mr": 500_000, "chase_ur": 0, "aeroplan_fixed": 0},
             bonuses=[Bonus("amex_mr", "aeroplan", 0.25, None, "manual")])
-    used = [b for b in r.bundles
-            if any(s.get("program") == "aeroplan" for s in b["segments"])]
-    assert used
-    assert used[0]["points"]["amex_mr"] == 40_000       # ceil(50000 / 1.25)
+    # target the bundle whose ONLY award is the aeroplan one, so the assertion
+    # isolates that redemption's cost rather than summing several awards
+    only_ap = [b for b in r.bundles
+               if [s["program"] for s in b["segments"] if s["kind"] == "award"]
+               == ["aeroplan"]]
+    assert only_ap
+    assert only_ap[0]["points"]["amex_mr"] == 40_000     # ceil(50000 / 1.25)
+
+    # and the un-bonused Virgin award in the both-awards bundle still costs 1:1,
+    # so a bonus on one program never discounts another
+    both = [b for b in r.bundles
+            if sorted(s["program"] for s in b["segments"] if s["kind"] == "award")
+            == ["aeroplan", "virginatlantic"]]
+    assert both and both[0]["points"]["amex_mr"] == 45_000 + 40_000
 
 
 def test_shapes_are_unique():
