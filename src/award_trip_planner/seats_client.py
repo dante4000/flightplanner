@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import time
 
 import httpx
 
@@ -41,9 +42,47 @@ def _map_entry(a: dict, cfg: Config) -> list[AwardFare]:
                 direct=bool(a.get(f"{c}DirectRaw")),
                 airlines=a.get(f"{c}AirlinesRaw") or "",
                 updated_at=a.get("UpdatedAt", ""),
+                program=a.get("Source", ""),
             )
         )
     return out
+
+
+RATE_LIMIT_RETRIES = 4
+RATE_LIMIT_BACKOFF_S = 20.0
+DAILY_QUOTA = 1000
+
+
+class QuotaExhausted(RuntimeError):
+    """The seats.aero daily call budget is spent; retrying today cannot help."""
+
+
+def _get_with_backoff(client, params, cache, sleep=None):
+    """GET /search, retrying on 429.
+
+    seats.aero enforces a burst limit separate from the daily quota. Without
+    this, a multi-pair refresh dies partway and leaves the award cache half
+    written. Every attempt counts against the daily quota, because the server
+    counted it too.
+    """
+    sleep = sleep or time.sleep
+    delay = RATE_LIMIT_BACKOFF_S
+    for attempt in range(RATE_LIMIT_RETRIES + 1):
+        # Check before spending, not after. Retries count too — a backoff loop
+        # against an exhausted quota just burns the next day's headroom.
+        used = cache.quota(today_utc())
+        if used >= DAILY_QUOTA:
+            raise QuotaExhausted(
+                f"seats.aero daily quota spent ({used}/{DAILY_QUOTA}); "
+                "it resets at 00:00 UTC. Cached data is still usable.")
+        resp = client.get(f"{BASE}/search", params=params)
+        cache.bump_quota(today_utc())
+        if resp.status_code != 429 or attempt == RATE_LIMIT_RETRIES:
+            return resp
+        wait = float(resp.headers.get("retry-after") or delay)
+        sleep(wait)
+        delay *= 2
+    return resp
 
 
 def fetch_awards(
@@ -55,6 +94,8 @@ def fetch_awards(
     cfg: Config,
     transport: httpx.BaseTransport | None = None,
     on_progress=None,
+    sources: str | None = None,
+    sleep=None,
 ) -> list[AwardFare]:
     fares: list[AwardFare] = []
     client = httpx.Client(
@@ -72,12 +113,12 @@ def fetch_awards(
                     "start_date": start,
                     "end_date": end,
                     "take": PAGE_SIZE,
-                    "sources": "aeroplan",
                 }
+                if sources:
+                    params["sources"] = sources
                 if cursor:
                     params["cursor"] = cursor
-                resp = client.get(f"{BASE}/search", params=params)
-                cache.bump_quota(today_utc())
+                resp = _get_with_backoff(client, params, cache, sleep=sleep)
                 resp.raise_for_status()
                 body = resp.json()
                 for entry in body.get("data", []):

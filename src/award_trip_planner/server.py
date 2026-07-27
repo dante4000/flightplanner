@@ -39,8 +39,15 @@ def create_app(data_dir: Path, api_key: str, award_fetcher=None, cash_fetcher=No
             (cfg.korea_airports, cfg.japan_airports),
             (cfg.japan_airports, cfg.korea_airports),
         ]
+        # Pinned to Aeroplan on purpose. This dashboard has no program dimension:
+        # build_tables keys awards by (origin, dest, date, cabin) only, the fee and
+        # captions are hardcoded Aeroplan, and the heatmap would show one arbitrary
+        # program per cell. Fetching every program here would present, say, a Virgin
+        # Atlantic fare as an Aeroplan redemption. The program-aware v2 solver reads
+        # the same cache without this filter.
         return seats_client.fetch_awards(
-            api_key, pairs, cfg.outbound_start, cfg.return_b_deadline, cache, cfg)
+            api_key, pairs, cfg.outbound_start, cfg.return_b_deadline, cache, cfg,
+            sources="aeroplan")
 
     def default_cash_fetcher(q, **kw):
         return cash_client.fetch_cash(q, cache, state["cfg"])
