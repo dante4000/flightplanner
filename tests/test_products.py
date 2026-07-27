@@ -96,3 +96,39 @@ def test_stopover_only_for_programs_with_a_rule():
 
 def test_fee_helper():
     assert fee_usd(CFG) == FEE
+
+
+def test_stopover_partial_unknown_seats_is_flagged_unknown():
+    """One leg unknown must not be reported as the other leg's confirmed count."""
+    t = tables(awards=[
+        aw("LAX", "ICN", "2026-10-01", "Y", 55_000, "aeroplan", seats=4),
+        aw("ICN", "NRT", "2026-10-05", "Y", 7_500, "aeroplan", seats=0),
+    ])
+    got = stopover_candidates(t, LA, SEOUL, TOKYO, "2026-10-01", "2026-10-05",
+                              ("Y",), party=2, cfg=CFG)
+    assert len(got) == 1
+    assert "seats-unknown" in got[0].flags
+    # the KNOWN leg still gates: 4 confirmed seats cannot carry a party of 9,
+    # whatever the unknown leg turns out to hold
+    assert stopover_candidates(t, LA, SEOUL, TOKYO, "2026-10-01", "2026-10-05",
+                               ("Y",), party=9, cfg=CFG) == []
+
+
+def test_stopover_both_legs_unknown_is_kept_and_flagged():
+    t = tables(awards=[
+        aw("LAX", "ICN", "2026-10-01", "Y", 55_000, "aeroplan", seats=0),
+        aw("ICN", "NRT", "2026-10-05", "Y", 7_500, "aeroplan", seats=0),
+    ])
+    got = stopover_candidates(t, LA, SEOUL, TOKYO, "2026-10-01", "2026-10-05",
+                              ("Y",), party=6, cfg=CFG)
+    assert len(got) == 1
+    assert got[0].seats == 0 and "seats-unknown" in got[0].flags
+
+
+def test_stopover_known_insufficient_seats_is_gated():
+    t = tables(awards=[
+        aw("LAX", "ICN", "2026-10-01", "Y", 55_000, "aeroplan", seats=4),
+        aw("ICN", "NRT", "2026-10-05", "Y", 7_500, "aeroplan", seats=2),
+    ])
+    assert stopover_candidates(t, LA, SEOUL, TOKYO, "2026-10-01", "2026-10-05",
+                               ("Y",), party=3, cfg=CFG) == []

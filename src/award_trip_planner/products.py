@@ -132,8 +132,12 @@ def stopover_candidates(tables, a: Stop, b: Stop, c: Stop, date_ab, date_bc,
                     second = tables.awards.get((mid, d, date_bc, cabin, prog))
                     if second is None:
                         continue
-                    seats = min(first.seats, second.seats) if first.seats and second.seats \
-                        else min([s for s in (first.seats, second.seats) if s] or [0])
+                    # 0 means "unknown", not "none". If either leg is unknown the
+                    # pair is unknown — reporting the other leg's count would
+                    # advertise confirmed seats we cannot actually confirm.
+                    known = [s for s in (first.seats, second.seats) if s > 0]
+                    any_unknown = first.seats == 0 or second.seats == 0
+                    seats = min(known) if known else 0
                     if 0 < seats < party:
                         continue
                     flags = ["stopover-verify-with-program"]
@@ -145,7 +149,7 @@ def stopover_candidates(tables, a: Stop, b: Stop, c: Stop, date_ab, date_bc,
                                 flags.append("award-taxes-estimated")
                         else:
                             taxes += fare.taxes_usd
-                    if seats == 0:
+                    if any_unknown:
                         flags.append("seats-unknown")
                     out.append(SegCandidate(
                         kind="award",
