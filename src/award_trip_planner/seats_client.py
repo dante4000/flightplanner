@@ -41,6 +41,7 @@ def _map_entry(a: dict, cfg: Config) -> list[AwardFare]:
                 direct=bool(a.get(f"{c}DirectRaw")),
                 airlines=a.get(f"{c}AirlinesRaw") or "",
                 updated_at=a.get("UpdatedAt", ""),
+                program=a.get("Source", ""),
             )
         )
     return out
@@ -55,6 +56,7 @@ def fetch_awards(
     cfg: Config,
     transport: httpx.BaseTransport | None = None,
     on_progress=None,
+    sources: str | None = None,
 ) -> list[AwardFare]:
     fares: list[AwardFare] = []
     client = httpx.Client(
@@ -72,8 +74,9 @@ def fetch_awards(
                     "start_date": start,
                     "end_date": end,
                     "take": PAGE_SIZE,
-                    "sources": "aeroplan",
                 }
+                if sources:
+                    params["sources"] = sources
                 if cursor:
                     params["cursor"] = cursor
                 resp = client.get(f"{BASE}/search", params=params)

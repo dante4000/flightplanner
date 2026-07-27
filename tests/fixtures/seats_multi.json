@@ -1,0 +1,35 @@
+{
+  "data": [
+    {
+      "ID": "id_ap",
+      "Route": {"OriginAirport": "LAX", "DestinationAirport": "ICN", "Source": "aeroplan", "Distance": 5987},
+      "Date": "2026-10-01",
+      "YAvailableRaw": true, "JAvailableRaw": false,
+      "YMileageCostRaw": 55000, "JMileageCostRaw": 0,
+      "YTotalTaxesRaw": 11550, "JTotalTaxesRaw": 0,
+      "TaxesCurrency": "CAD",
+      "YRemainingSeatsRaw": 4, "JRemainingSeatsRaw": 0,
+      "YDirectRaw": true, "JDirectRaw": false,
+      "YAirlinesRaw": "AC", "JAirlinesRaw": "",
+      "Source": "aeroplan",
+      "UpdatedAt": "2026-07-25T10:00:00Z"
+    },
+    {
+      "ID": "id_vs",
+      "Route": {"OriginAirport": "LAX", "DestinationAirport": "ICN", "Source": "virginatlantic", "Distance": 5987},
+      "Date": "2026-10-01",
+      "YAvailableRaw": false, "JAvailableRaw": true,
+      "YMileageCostRaw": 0, "JMileageCostRaw": 60000,
+      "YTotalTaxesRaw": 0, "JTotalTaxesRaw": 4300,
+      "TaxesCurrency": "USD",
+      "YRemainingSeatsRaw": 0, "JRemainingSeatsRaw": 2,
+      "YDirectRaw": false, "JDirectRaw": true,
+      "YAirlinesRaw": "", "JAirlinesRaw": "NH",
+      "Source": "virginatlantic",
+      "UpdatedAt": "2026-07-25T11:00:00Z"
+    }
+  ],
+  "count": 2,
+  "hasMore": false,
+  "cursor": ""
+}

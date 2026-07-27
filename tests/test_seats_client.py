@@ -16,7 +16,6 @@ def make_transport(pages):
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
         assert request.headers["Partner-Authorization"] == "test_key"
-        assert request.url.params["sources"] == "aeroplan"
         page = pages[1] if request.url.params.get("cursor") else pages[0]
         return httpx.Response(200, json=json.loads((FIXTURES / page).read_text()))
 
@@ -54,3 +53,39 @@ def test_quota_counted_per_http_call(tmp_path):
                  cache, Config(), transport=transport)
     from award_trip_planner.seats_client import today_utc
     assert cache.quota(today_utc()) == 2
+
+
+def test_fetch_all_programs_by_default(tmp_path):
+    cache = Cache(tmp_path / "c.sqlite")
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(200, json=json.loads((FIXTURES / "seats_multi.json").read_text()))
+
+    fares = fetch_awards(
+        "test_key", [(["LAX"], ["ICN"])], "2026-09-25", "2026-10-31",
+        cache, Config(), transport=httpx.MockTransport(handler),
+    )
+    # no sources filter is sent at all -> the API returns every program
+    assert "sources" not in seen["params"]
+    by_program = {(f.program, f.cabin): f for f in fares}
+    assert by_program[("aeroplan", "Y")].miles == 55_000
+    assert by_program[("virginatlantic", "J")].miles == 60_000
+    # USD taxes are not run through the CAD conversion
+    assert by_program[("virginatlantic", "J")].taxes_usd == 43.00
+
+
+def test_sources_filter_still_available(tmp_path):
+    cache = Cache(tmp_path / "c.sqlite")
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(200, json=json.loads((FIXTURES / "seats_multi.json").read_text()))
+
+    fetch_awards(
+        "test_key", [(["LAX"], ["ICN"])], "2026-09-25", "2026-10-31",
+        cache, Config(), transport=httpx.MockTransport(handler), sources="aeroplan",
+    )
+    assert seen["params"]["sources"] == "aeroplan"

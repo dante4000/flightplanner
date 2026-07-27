@@ -15,6 +15,7 @@ class AwardFare:
     direct: bool
     airlines: str
     updated_at: str
+    program: str = ""          # seats.aero Source, e.g. "aeroplan"
 
 
 @dataclass(frozen=True)
