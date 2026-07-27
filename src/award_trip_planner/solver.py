@@ -57,8 +57,11 @@ def _assign_funding(awards: list[SegCandidate], balances, lookup):
     """Cheapest feasible currency assignment; None when infeasible.
 
     Exhaustive over currencies-per-award: <=3 currencies, <=6 awards.
-    Chooses the feasible assignment leaving the largest minimum headroom so a
-    single currency is not drained needlessly.
+    Primary objective is minimizing total points spent -- this is what makes a
+    transfer bonus (e.g. 25% MR->Aeroplan) actually get used instead of being
+    defeated by a same-size draw from an un-bonused currency. Ties (equal
+    spend) are broken by the assignment leaving the largest minimum headroom,
+    so a single currency is not drained needlessly.
     """
     per_award = []
     for c in awards:
@@ -75,7 +78,7 @@ def _assign_funding(awards: list[SegCandidate], balances, lookup):
             continue
         headroom = min(balances.get(c, 0) - totals.get(c, 0) for c in CURRENCIES)
         spent = sum(totals.values())
-        key = (-headroom, spent)
+        key = (spent, -headroom)
         if best is None or key < best[0]:
             best = (key, totals)
     return None if best is None else best[1]
@@ -102,11 +105,24 @@ def _bundle_rank_key(b: dict):
     return (0, -cpp)
 
 
+def _routing_str(routing: tuple[tuple[str, str], ...]) -> str:
+    """`(("LAX","ICN"),("ICN","NRT"))` -> `"LAX-ICN-NRT"`."""
+    if not routing:
+        return ""
+    return "-".join([routing[0][0]] + [d for _, d in routing])
+
+
 def _shape_labels(shape: tuple) -> list[str]:
-    """JSON-safe, hashable rendering of a shape: one string per slot."""
+    """JSON-safe, hashable rendering of a shape: one string per slot.
+
+    The routing is part of the label (not just kind/program/cabin) so that two
+    options that differ only by which airport pair they fly through -- e.g. a
+    multi-airport city like Seoul (ICN vs GMP) -- still render as distinguishable
+    shapes instead of colliding into one.
+    """
     out = []
-    for slot_kind, i, (kind, program, cabin) in shape:
-        out.append(f"{slot_kind}:{i}:{kind}/{program or 'cash'}/{cabin}")
+    for slot_kind, i, (kind, program, cabin, routing) in shape:
+        out.append(f"{slot_kind}:{i}:{kind}/{program or 'cash'}/{cabin}/{_routing_str(routing)}")
     return out
 
 
@@ -131,12 +147,14 @@ def solve(trip: Trip, tables, balances: dict, bonuses: list, cfg: Config,
     lookup = bonus_lookup_from(bonuses)
     dates_per_seg, capped = _segment_date_options(trip, cfg)
     res.date_paths_capped = capped
-    if not any(dates_per_seg):
-        res.notes.append("no date assignment satisfies the windows and deadline")
+    if not all(dates_per_seg):
+        res.notes.append(
+            "no feasible dates for at least one segment (check stopover night "
+            "bounds and the arrival deadline)")
         return res
 
     # Candidates per (segment, date), pruned to the best few per segment-option.
-    # `opts[i][(kind, program, cabin)] -> {date: SegCandidate}`
+    # `opts[i][(kind, program, cabin, routing)] -> {date: SegCandidate}`
     opts, missing_seg, pruned_seg = _segment_options(trip, tables, dates_per_seg, cfg, now)
     if any(not o for o in opts):
         res.notes.append("no option priced for at least one segment")
@@ -156,6 +174,8 @@ def solve(trip: Trip, tables, balances: dict, bonuses: list, cfg: Config,
 
     by_shape: dict[tuple, tuple] = {}
     baseline: float | None = None
+    dropped_notes: list[str] = []
+    seen_dropped: set[str] = set()
 
     for shape in shapes:
         best = _best_date_path(trip, shape, opts, spans)
@@ -165,23 +185,52 @@ def solve(trip: Trip, tables, balances: dict, bonuses: list, cfg: Config,
         awards = [c for c in chosen if c.kind == "award"]
         if not awards:
             baseline = cash_total if baseline is None else min(baseline, cash_total)
+            by_shape[shape] = ((cash_total, 0), cash_total,
+                               {c: 0 for c in CURRENCIES}, chosen, path, False)
+            continue
+
+        points_constrained = False
+        assigned = _assign_funding(awards, balances, lookup)
+        if assigned is None:
+            # The cash-cheapest date path for this shape can't be funded from
+            # the available balances. Before giving up on the whole shape,
+            # retry with the DP minimizing miles instead of cash: a date with
+            # a higher cash cost can still require far fewer points (e.g. an
+            # award chart that jumps 50k->90k between two dates), and that
+            # date may be the one the user can actually afford.
+            alt = _best_date_path(trip, shape, opts, spans, objective="miles")
+            if alt is not None:
+                alt_cash_total, alt_chosen, alt_path = alt
+                alt_awards = [c for c in alt_chosen if c.kind == "award"]
+                alt_assigned = _assign_funding(alt_awards, balances, lookup)
+                if alt_assigned is not None:
+                    cash_total, chosen, path = alt_cash_total, alt_chosen, alt_path
+                    assigned = alt_assigned
+                    points_constrained = True
+        if assigned is None:
+            labels = _shape_labels(shape)
+            note = f"{'+'.join(labels)} dropped: balances cannot fund it"
+            if note not in seen_dropped and len(dropped_notes) < 10:
+                seen_dropped.add(note)
+                dropped_notes.append(note)
+            continue
+
         totals = {c: 0 for c in CURRENCIES}
-        if awards:
-            assigned = _assign_funding(awards, balances, lookup)
-            if assigned is None:
-                continue
-            totals.update(assigned)
+        totals.update(assigned)
         by_shape[shape] = ((cash_total, sum(totals.values())),
-                           cash_total, totals, chosen, path)
+                           cash_total, totals, chosen, path, points_constrained)
 
     res.baseline_cash = baseline
+    res.notes.extend(dropped_notes)
     bundles = []
-    for shape, (_key, cash_total, totals, chosen, path) in by_shape.items():
+    for shape, (_key, cash_total, totals, chosen, path, points_constrained) in by_shape.items():
         pts = sum(totals.values())
         cpp = None
         if pts and baseline is not None:
             cpp = round(100 * (baseline - cash_total) / pts, 2)
         flags = sorted({f for c in chosen for f in c.flags})
+        if points_constrained:
+            flags.append("points-constrained-dates")
         if cpp is not None and cpp <= 0:
             flags.append("worse-than-cash")
         bundles.append(Bundle2(
@@ -232,8 +281,17 @@ def _prune_key(c: SegCandidate) -> float:
     return c.cash_usd + 0.0115 * c.miles
 
 
+def _routing_of(c: SegCandidate) -> tuple[tuple[str, str], ...]:
+    return tuple((l.origin, l.dest) for l in c.legs)
+
+
 def _segment_options(trip, tables, dates_per_seg, cfg, now):
-    """opts[i][(kind, program, cabin)] = {date: SegCandidate}, pruned per segment.
+    """opts[i][(kind, program, cabin, routing)] = {date: SegCandidate}, pruned per segment.
+
+    The key includes the routing (the candidate's leg origin/dest pairs) so
+    that distinct airport pairs -- e.g. LAX->ICN vs LAX->GMP for a multi-airport
+    city -- are kept as distinct options instead of one overwriting the other
+    via `dict.setdefault(...)[d] = c` last-write-wins.
 
     Returns (opts, missing, pruned): `missing` if any date had no priced option
     at all; `pruned` if any segment had more distinct option-kinds than the cap
@@ -252,7 +310,8 @@ def _segment_options(trip, tables, dates_per_seg, cfg, now):
                 missing = True
                 continue
             for c in cands:
-                by_key.setdefault((c.kind, c.program, c.cabin), {})[d] = c
+                key = (c.kind, c.program, c.cabin, _routing_of(c))
+                by_key.setdefault(key, {})[d] = c
         if len(by_key) > cfg.max_options_per_segment:
             pruned = True
         # keep the cheapest few option-kinds per segment so shape count stays sane
@@ -267,8 +326,11 @@ def _segment_options(trip, tables, dates_per_seg, cfg, now):
 def _span_options(trip, tables, dates_per_seg, cfg):
     """Stopover products covering segments (i, i+1).
 
-    `spans[i][(kind, program, cabin)] = {(date_i, date_i1): SegCandidate}` —
-    keyed by the date *pair* because one award covers both flights.
+    `spans[i][(kind, program, cabin, routing)] = {(date_i, date_i1): SegCandidate}`
+    — keyed by the date *pair* because one award covers both flights, and by
+    the routing (both legs' origin/dest pairs) for the same reason as
+    `_segment_options`: a multi-airport city must not let one airport pair's
+    stopover candidate silently overwrite another's.
     """
     segs = trip.segments()
     spans: list[dict] = [dict() for _ in range(len(segs))]
@@ -281,7 +343,7 @@ def _span_options(trip, tables, dates_per_seg, cfg):
                     continue
                 for cand in stopover_candidates(tables, a, b, c2, d0, d1,
                                                 trip.cabins, trip.party_size, cfg):
-                    key = (cand.kind, cand.program, cand.cabin)
+                    key = (cand.kind, cand.program, cand.cabin, _routing_of(cand))
                     spans[i].setdefault(key, {})[(d0, d1)] = cand
     return spans
 
@@ -327,13 +389,24 @@ def _nights_ok(trip, segs, seg_idx: int, prev_date: str, this_date: str) -> bool
     return True
 
 
-def _best_date_path(trip, shape, opts, spans):
+def _best_date_path(trip, shape, opts, spans, objective: str = "cash"):
     """Cheapest chained date assignment for one fixed shape, by DP over slots.
 
     State after each slot is the departure date of the last segment it covered,
     plus the running cost. Costs are additive and the chaining constraint looks
     only one segment back, so keeping the best cost per end-date is optimal.
+
+    `objective="cash"` (default) minimizes total cash out-of-pocket, same as
+    before. `objective="miles"` instead minimizes total miles required across
+    the shape -- used as a fallback when the cash-optimal date assignment turns
+    out to be unaffordable, so a cheaper-in-points (but not cheaper-in-cash)
+    date can still be found. Either way the returned cash total is the true
+    cash cost of whichever candidates were actually chosen, not the DP's
+    internal objective value.
     """
+    def cost_of(cand: SegCandidate) -> float:
+        return cand.miles if objective == "miles" else cand.cash_usd
+
     segs = trip.segments()
     n = len(segs)
     # state: {last_segment_departure_date: (cost, backpointer_list_of_dates)}
@@ -347,14 +420,14 @@ def _best_date_path(trip, shape, opts, spans):
         if slot_no == 0:
             if kind == "one":
                 for d, cand in table.items():
-                    nxt[d] = (cand.cash_usd, (d,))
+                    nxt[d] = (cost_of(cand), (d,))
             else:
                 for (d0, d1), cand in table.items():
                     if not _nights_ok(trip, segs, i + 1, d0, d1):
                         continue
                     nxt[d1] = min(
                         nxt.get(d1, (float("inf"), ())),
-                        (cand.cash_usd, (d0, d1)),
+                        (cost_of(cand), (d0, d1)),
                         key=lambda x: x[0],
                     )
         else:
@@ -363,7 +436,7 @@ def _best_date_path(trip, shape, opts, spans):
                     for d, cand in table.items():
                         if not _nights_ok(trip, segs, i, prev_date, d):
                             continue
-                        total = cost + cand.cash_usd
+                        total = cost + cost_of(cand)
                         cur = nxt.get(d)
                         if cur is None or total < cur[0]:
                             nxt[d] = (total, dates + (d,))
@@ -373,7 +446,7 @@ def _best_date_path(trip, shape, opts, spans):
                             continue
                         if not _nights_ok(trip, segs, i + 1, d0, d1):
                             continue
-                        total = cost + cand.cash_usd
+                        total = cost + cost_of(cand)
                         cur = nxt.get(d1)
                         if cur is None or total < cur[0]:
                             nxt[d1] = (total, dates + (d0, d1))
@@ -390,14 +463,15 @@ def _best_date_path(trip, shape, opts, spans):
     if not feasible:
         return None
     end = min(feasible, key=lambda d: feasible[d][0])
-    cost, path = feasible[end]
+    _, path = feasible[end]
     chosen = []
     for kind, i, key in shape:
         if kind == "one":
             chosen.append(opts[i][key][path[i]])
         else:
             chosen.append(spans[i][key][(path[i], path[i + 1])])
-    return round(cost, 2), chosen, path
+    cash_total = round(sum(c.cash_usd for c in chosen), 2)
+    return cash_total, chosen, path
 
 
 def _award_matrix(tables, balances, lookup, party) -> list[dict]:
