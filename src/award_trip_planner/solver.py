@@ -105,6 +105,39 @@ def _bundle_rank_key(b: dict):
     return (0, -cpp)
 
 
+_MAX_DROPPED_NOTES = 10
+
+
+def _dropped_program_notes(dropped_by_programs: dict[tuple[str, ...], int]) -> list[str]:
+    """User-facing notes for shapes dropped as unfundable, grouped by program.
+
+    Previously each dropped shape got its own note keyed by the exact
+    (deduped) shape-label string, capped at 10 with no acknowledgement of
+    what was cut beyond that -- and the text itself was a debug-formatted
+    shape-label join (`one:0:award/aeroplan/...`), not something a user
+    reading a results page could parse. Grouping by the program(s) actually
+    involved collapses many dropped shapes into one line ("N strategies
+    using X/Y awards were dropped") and, when there are still more distinct
+    groups than fit, says so explicitly instead of silently truncating.
+    """
+    if not dropped_by_programs:
+        return []
+    items = sorted(dropped_by_programs.items(), key=lambda kv: -kv[1])
+    shown, rest = items[:_MAX_DROPPED_NOTES], items[_MAX_DROPPED_NOTES:]
+    notes = [_dropped_note(programs, count) for programs, count in shown]
+    if rest:
+        extra = sum(count for _, count in rest)
+        notes.append(f"...and {extra} more shapes dropped for funding")
+    return notes
+
+
+def _dropped_note(programs: tuple[str, ...], count: int) -> str:
+    who = "/".join(programs) if programs else "award"
+    if count == 1:
+        return f"1 strategy using {who} awards was dropped: balances cannot fund it"
+    return f"{count} strategies using {who} awards were dropped: balances cannot fund them"
+
+
 def _routing_str(routing: tuple[tuple[str, str], ...]) -> str:
     """`(("LAX","ICN"),("ICN","NRT"))` -> `"LAX-ICN-NRT"`."""
     if not routing:
@@ -155,16 +188,13 @@ def solve(trip: Trip, tables, balances: dict, bonuses: list, cfg: Config,
 
     # Candidates per (segment, date), pruned to the best few per segment-option.
     # `opts[i][(kind, program, cabin, routing)] -> {date: SegCandidate}`
-    opts, missing_seg, pruned_seg = _segment_options(trip, tables, dates_per_seg, cfg, now)
+    opts, missing_seg, prune_notes = _segment_options(trip, tables, dates_per_seg, cfg, now)
     if any(not o for o in opts):
         res.notes.append("no option priced for at least one segment")
         return res
     if missing_seg:
         res.notes.append("some dates had no priced option and were skipped")
-    if pruned_seg:
-        res.notes.append(
-            f"a segment had more than {cfg.max_options_per_segment} distinct "
-            "option-kinds; the priciest were pruned from consideration")
+    res.notes.extend(prune_notes)
 
     spans = _span_options(trip, tables, dates_per_seg, cfg)
     shapes = _enumerate_shapes(opts, spans, len(segs), cfg.max_shapes)
@@ -174,8 +204,7 @@ def solve(trip: Trip, tables, balances: dict, bonuses: list, cfg: Config,
 
     by_shape: dict[tuple, tuple] = {}
     baseline: float | None = None
-    dropped_notes: list[str] = []
-    seen_dropped: set[str] = set()
+    dropped_by_programs: dict[tuple[str, ...], int] = {}
 
     for shape in shapes:
         best = _best_date_path(trip, shape, opts, spans)
@@ -208,11 +237,12 @@ def solve(trip: Trip, tables, balances: dict, bonuses: list, cfg: Config,
                     assigned = alt_assigned
                     points_constrained = True
         if assigned is None:
-            labels = _shape_labels(shape)
-            note = f"{'+'.join(labels)} dropped: balances cannot fund it"
-            if note not in seen_dropped and len(dropped_notes) < 10:
-                seen_dropped.add(note)
-                dropped_notes.append(note)
+            # User-facing and grouped by program, not a raw shape-label dump:
+            # several dropped shapes typically share the same unaffordable
+            # program(s), and a caller cares which programs are the problem,
+            # not the internal (kind/cabin/routing) key of every shape.
+            programs = tuple(sorted({c.program for c in awards}))
+            dropped_by_programs[programs] = dropped_by_programs.get(programs, 0) + 1
             continue
 
         totals = {c: 0 for c in CURRENCIES}
@@ -221,7 +251,7 @@ def solve(trip: Trip, tables, balances: dict, bonuses: list, cfg: Config,
                            cash_total, totals, chosen, path, points_constrained)
 
     res.baseline_cash = baseline
-    res.notes.extend(dropped_notes)
+    res.notes.extend(_dropped_program_notes(dropped_by_programs))
     bundles = []
     for shape, (_key, cash_total, totals, chosen, path, points_constrained) in by_shape.items():
         pts = sum(totals.values())
@@ -285,6 +315,46 @@ def _routing_of(c: SegCandidate) -> tuple[tuple[str, str], ...]:
     return tuple((l.origin, l.dest) for l in c.legs)
 
 
+def _prune_options(by_key: dict, cap: int) -> tuple[dict, dict[str, int]]:
+    """Keep at most `cap` option-kinds, reserving slots for award options.
+
+    Ranking every option-kind together by a single cash+points scalarizer lets
+    cash options -- one per airport pair, and multi-airport cities multiply
+    that further (4 pairs x 2 cabins = 8 cash kinds alone) -- crowd out every
+    award option even when affordable awards exist: awards carry a large miles
+    component in the scalarizer and so rank "worse" than nearly any cash fare.
+    Rank within each kind ("cash", "award") separately, reserve at least
+    `min(#award kinds, cap // 2)` award slots so awards can never be crowded
+    out entirely, then fill the remaining capacity with the cheapest option-
+    kinds left over regardless of kind.
+
+    Returns (kept, dropped_by_kind) so the caller can report exactly how many
+    of each kind were pruned, not just "some segment was pruned."
+    """
+    by_kind: dict[str, list[tuple]] = {}
+    for key, table in by_key.items():
+        by_kind.setdefault(key[0], []).append((key, table))
+    for group in by_kind.values():
+        group.sort(key=lambda kv: min(_prune_key(c) for c in kv[1].values()))
+
+    award = by_kind.get("award", [])
+    reserved = min(len(award), cap // 2)
+    kept = award[:reserved]
+    rest = sorted(
+        award[reserved:]
+        + [kv for kind, group in by_kind.items() if kind != "award" for kv in group],
+        key=lambda kv: min(_prune_key(c) for c in kv[1].values()),
+    )
+    kept += rest[: max(cap - len(kept), 0)]
+
+    kept_keys = {key for key, _ in kept}
+    dropped_by_kind: dict[str, int] = {}
+    for key in by_key:
+        if key not in kept_keys:
+            dropped_by_kind[key[0]] = dropped_by_kind.get(key[0], 0) + 1
+    return dict(kept), dropped_by_kind
+
+
 def _segment_options(trip, tables, dates_per_seg, cfg, now):
     """opts[i][(kind, program, cabin, routing)] = {date: SegCandidate}, pruned per segment.
 
@@ -293,15 +363,16 @@ def _segment_options(trip, tables, dates_per_seg, cfg, now):
     city -- are kept as distinct options instead of one overwriting the other
     via `dict.setdefault(...)[d] = c` last-write-wins.
 
-    Returns (opts, missing, pruned): `missing` if any date had no priced option
-    at all; `pruned` if any segment had more distinct option-kinds than the cap
-    and some were discarded -- both surfaced as notes by the caller so a tight
-    cap never silently narrows the search.
+    Returns (opts, missing, prune_notes): `missing` if any date had no priced
+    option at all; `prune_notes` is one user-facing note per segment that hit
+    the cap, stating how many of each kind were dropped -- so a tight cap
+    never silently narrows the search, and never silently narrows it to "no
+    awards" specifically (see `_prune_options`).
     """
     n = len(trip.segments())
     opts: list[dict] = []
     missing = False
-    pruned = False
+    prune_notes: list[str] = []
     for i in range(n):
         by_key: dict[tuple, dict] = {}
         for d in dates_per_seg[i]:
@@ -312,15 +383,14 @@ def _segment_options(trip, tables, dates_per_seg, cfg, now):
             for c in cands:
                 key = (c.kind, c.program, c.cabin, _routing_of(c))
                 by_key.setdefault(key, {})[d] = c
-        if len(by_key) > cfg.max_options_per_segment:
-            pruned = True
-        # keep the cheapest few option-kinds per segment so shape count stays sane
-        ranked = sorted(
-            by_key.items(),
-            key=lambda kv: min(_prune_key(c) for c in kv[1].values()),
-        )[: cfg.max_options_per_segment]
-        opts.append(dict(ranked))
-    return opts, missing, pruned
+        kept, dropped_by_kind = _prune_options(by_key, cfg.max_options_per_segment)
+        if dropped_by_kind:
+            parts = ", ".join(f"{cnt} {kind}" for kind, cnt in sorted(dropped_by_kind.items()))
+            prune_notes.append(
+                f"segment {i} had more than {cfg.max_options_per_segment} distinct "
+                f"option-kinds; {sum(dropped_by_kind.values())} were pruned ({parts})")
+        opts.append(kept)
+    return opts, missing, prune_notes
 
 
 def _span_options(trip, tables, dates_per_seg, cfg):
@@ -353,6 +423,15 @@ def _enumerate_shapes(opts, spans, n: int, cap: int) -> list[tuple]:
 
     A shape is a tuple of slots; each slot is ("one", i, key) or ("span", i, key)
     where a span consumes segments i and i+1.
+
+    Spans are tried BEFORE singles at every position. Walking singles first
+    means the entire single-option subtree at position i (which, on a
+    multi-airport trip, can be `cabins x airport_pairs x programs` wide) gets
+    fully explored before a span at position i is ever tried -- so on a trip
+    large enough to trip `cap`, span-containing shapes (stopovers -- the more
+    interesting itinerary) are the first thing lost, not the last, and can be
+    absent from the results entirely even though they exist. Trying spans
+    first means they dominate the front of the walk instead.
     """
     shapes: list[tuple] = []
 
@@ -362,15 +441,15 @@ def _enumerate_shapes(opts, spans, n: int, cap: int) -> list[tuple]:
         if i == n:
             shapes.append(acc)
             return
-        for key in opts[i]:
-            walk(i + 1, acc + (("one", i, key),))
-            if len(shapes) >= cap:
-                return
         if i + 1 < n:
             for key in spans[i]:
                 walk(i + 2, acc + (("span", i, key),))
                 if len(shapes) >= cap:
                     return
+        for key in opts[i]:
+            walk(i + 1, acc + (("one", i, key),))
+            if len(shapes) >= cap:
+                return
 
     walk(0, ())
     return shapes
@@ -396,26 +475,43 @@ def _best_date_path(trip, shape, opts, spans, objective: str = "cash"):
     plus the running cost. Costs are additive and the chaining constraint looks
     only one segment back, so keeping the best cost per end-date is optimal.
 
-    `objective="cash"` (default) minimizes total cash out-of-pocket, same as
-    before. `objective="miles"` instead minimizes total miles required across
-    the shape -- used as a fallback when the cash-optimal date assignment turns
-    out to be unaffordable, so a cheaper-in-points (but not cheaper-in-cash)
-    date can still be found. Either way the returned cash total is the true
-    cash cost of whichever candidates were actually chosen, not the DP's
-    internal objective value.
+    `objective="cash"` (default) minimizes total cash out-of-pocket, tied by
+    a second cost component that is always 0 (i.e. no tie-break beyond cash --
+    unchanged from before). `objective="miles"` instead minimizes total miles
+    required across the shape first -- used as a fallback when the cash-
+    optimal date assignment turns out to be unaffordable, so a cheaper-in-
+    points (but not cheaper-in-cash) date can still be found -- and breaks
+    ties in miles by cash, lexicographically. Without that tie-break, cash
+    contributes nothing to the "miles" objective's cost, so among two date
+    assignments needing equal miles the DP kept whichever it happened to
+    visit first (the earliest previous-segment date, an artifact of dict
+    iteration order) rather than the cheaper one -- e.g. it could report a
+    $2000 cash leg + a 50k-mile award as the chosen path over an available
+    $600 cash leg + the *same* 50k-mile award, purely by tie-break luck.
+    Either way the returned cash total is the true cash cost of whichever
+    candidates were actually chosen, not the DP's internal objective value.
     """
-    def cost_of(cand: SegCandidate) -> float:
-        return cand.miles if objective == "miles" else cand.cash_usd
+    def cost_of(cand: SegCandidate) -> tuple[float, float]:
+        if objective == "miles":
+            return (cand.miles, cand.cash_usd)
+        return (cand.cash_usd, 0.0)
+
+    def add_cost(a: tuple[float, float], b: tuple[float, float]) -> tuple[float, float]:
+        return (a[0] + b[0], a[1] + b[1])
+
+    _INF_COST = (float("inf"), float("inf"))
 
     segs = trip.segments()
     n = len(segs)
     # state: {last_segment_departure_date: (cost, backpointer_list_of_dates)}
-    state: dict[str, tuple[float, tuple[str, ...]]] = {}
+    # `cost` is a (primary, tie-break) tuple, compared lexicographically --
+    # see `cost_of` above.
+    state: dict[str, tuple[tuple[float, float], tuple[str, ...]]] = {}
 
     for slot_no, slot in enumerate(shape):
         kind, i, key = slot
         table = opts[i][key] if kind == "one" else spans[i][key]
-        nxt: dict[str, tuple[float, tuple[str, ...]]] = {}
+        nxt: dict[str, tuple[tuple[float, float], tuple[str, ...]]] = {}
 
         if slot_no == 0:
             if kind == "one":
@@ -426,7 +522,7 @@ def _best_date_path(trip, shape, opts, spans, objective: str = "cash"):
                     if not _nights_ok(trip, segs, i + 1, d0, d1):
                         continue
                     nxt[d1] = min(
-                        nxt.get(d1, (float("inf"), ())),
+                        nxt.get(d1, (_INF_COST, ())),
                         (cost_of(cand), (d0, d1)),
                         key=lambda x: x[0],
                     )
@@ -436,7 +532,7 @@ def _best_date_path(trip, shape, opts, spans, objective: str = "cash"):
                     for d, cand in table.items():
                         if not _nights_ok(trip, segs, i, prev_date, d):
                             continue
-                        total = cost + cost_of(cand)
+                        total = add_cost(cost, cost_of(cand))
                         cur = nxt.get(d)
                         if cur is None or total < cur[0]:
                             nxt[d] = (total, dates + (d,))
@@ -446,7 +542,7 @@ def _best_date_path(trip, shape, opts, spans, objective: str = "cash"):
                             continue
                         if not _nights_ok(trip, segs, i + 1, d0, d1):
                             continue
-                        total = cost + cost_of(cand)
+                        total = add_cost(cost, cost_of(cand))
                         cur = nxt.get(d1)
                         if cur is None or total < cur[0]:
                             nxt[d1] = (total, dates + (d0, d1))

@@ -35,7 +35,7 @@ class Config:
     top_n: int = 15
     date_grid_step_days: int = 1
     max_date_paths: int = 20_000
-    max_options_per_segment: int = 8
+    max_options_per_segment: int = 24
     max_shapes: int = 4_000
 
     def to_dict(self) -> dict:
