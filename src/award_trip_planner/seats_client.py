@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import time
 
 import httpx
 
@@ -47,6 +48,31 @@ def _map_entry(a: dict, cfg: Config) -> list[AwardFare]:
     return out
 
 
+RATE_LIMIT_RETRIES = 4
+RATE_LIMIT_BACKOFF_S = 20.0
+
+
+def _get_with_backoff(client, params, cache, sleep=None):
+    """GET /search, retrying on 429.
+
+    seats.aero enforces a burst limit separate from the daily quota. Without
+    this, a multi-pair refresh dies partway and leaves the award cache half
+    written. Every attempt counts against the daily quota, because the server
+    counted it too.
+    """
+    sleep = sleep or time.sleep
+    delay = RATE_LIMIT_BACKOFF_S
+    for attempt in range(RATE_LIMIT_RETRIES + 1):
+        resp = client.get(f"{BASE}/search", params=params)
+        cache.bump_quota(today_utc())
+        if resp.status_code != 429 or attempt == RATE_LIMIT_RETRIES:
+            return resp
+        wait = float(resp.headers.get("retry-after") or delay)
+        sleep(wait)
+        delay *= 2
+    return resp
+
+
 def fetch_awards(
     api_key: str,
     pairs: list[tuple[list[str], list[str]]],
@@ -57,6 +83,7 @@ def fetch_awards(
     transport: httpx.BaseTransport | None = None,
     on_progress=None,
     sources: str | None = None,
+    sleep=None,
 ) -> list[AwardFare]:
     fares: list[AwardFare] = []
     client = httpx.Client(
@@ -79,8 +106,7 @@ def fetch_awards(
                     params["sources"] = sources
                 if cursor:
                     params["cursor"] = cursor
-                resp = client.get(f"{BASE}/search", params=params)
-                cache.bump_quota(today_utc())
+                resp = _get_with_backoff(client, params, cache, sleep=sleep)
                 resp.raise_for_status()
                 body = resp.json()
                 for entry in body.get("data", []):

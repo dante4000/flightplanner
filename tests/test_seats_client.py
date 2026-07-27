@@ -89,3 +89,26 @@ def test_sources_filter_still_available(tmp_path):
         cache, Config(), transport=httpx.MockTransport(handler), sources="aeroplan",
     )
     assert seen["params"]["sources"] == "aeroplan"
+
+
+def test_rate_limit_is_retried_with_backoff(tmp_path):
+    cache = Cache(tmp_path / "c.sqlite")
+    calls, waits = [], []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(429, headers={"retry-after": "2"}, json={})
+        return httpx.Response(200, json=json.loads((FIXTURES / "seats_multi.json").read_text()))
+
+    fares = fetch_awards(
+        "test_key", [(["LAX"], ["ICN"])], "2026-09-25", "2026-10-31",
+        cache, Config(), transport=httpx.MockTransport(handler),
+        sleep=waits.append,
+    )
+    assert len(calls) == 2          # retried after the 429
+    assert waits == [2.0]           # honoured Retry-After
+    assert fares                    # and the retry's data was used
+    # both attempts counted against the daily quota, because the server counted them
+    from award_trip_planner.seats_client import today_utc
+    assert cache.quota(today_utc()) == 2
