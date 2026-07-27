@@ -27,7 +27,7 @@ class SegCandidate:
     program: str                    # "" for cash
     cabin: str
     airlines: str
-    seats: int                      # min across legs; 0 = unknown
+    seats: int                      # confirmed floor; check flags for "seats-unknown"
     flags: tuple[str, ...] = ()
     spans: int = 1                  # how many trip segments this covers
 
@@ -123,18 +123,21 @@ def stopover_candidates(tables, a: Stop, b: Stop, c: Stop, date_ab, date_bc,
             for mid2, d in _pairs(b, c):
                 if mid2 != mid:
                     continue          # must stop over in the airport you landed at
-                for (ko, kd, kdate, kcabin, prog), first in tables.awards.items():
-                    if (ko, kd, kdate, kcabin) != (o, mid, date_ab, cabin):
-                        continue
+                # Index lookup, not a table scan: the solver calls this once per
+                # date PAIR, so scanning every award row here is O(dates^2 * rows).
+                for first in tables.awards_by_od.get((o, mid, date_ab, cabin), []):
+                    prog = first.program
                     extra = program_for(prog).stopover_extra_miles
                     if extra is None:
                         continue
                     second = tables.awards.get((mid, d, date_bc, cabin, prog))
                     if second is None:
                         continue
-                    # 0 means "unknown", not "none". If either leg is unknown the
-                    # pair is unknown — reporting the other leg's count would
-                    # advertise confirmed seats we cannot actually confirm.
+                    # 0 means "unknown", not "none". `seats` stays the known
+                    # leg's count (so a confirmed-insufficient leg still gates),
+                    # but an unknown partner leg sets the flag — consumers must
+                    # read `seats-unknown` rather than infer confidence from
+                    # `seats > 0`.
                     known = [s for s in (first.seats, second.seats) if s > 0]
                     any_unknown = first.seats == 0 or second.seats == 0
                     seats = min(known) if known else 0
