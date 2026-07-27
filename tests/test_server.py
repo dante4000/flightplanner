@@ -112,3 +112,28 @@ def test_override_replaces_fetched_row(tmp_path):
     assert len(hits) == 1
     assert hits[0]["price_pp"] == 42.0 and hits[0]["manual"] is True
     assert len(rows2) == len(rows)
+
+
+def test_v1_award_fetch_is_pinned_to_aeroplan(tmp_path):
+    """v1 has no program dimension; fetching all programs would mislabel fares."""
+    import award_trip_planner.server as server_mod
+
+    seen = {}
+
+    def spy(api_key, pairs, start, end, cache, cfg, **kw):
+        seen.update(kw)
+        return []
+
+    real = server_mod.seats_client.fetch_awards
+    server_mod.seats_client.fetch_awards = spy
+    try:
+        app = create_app(tmp_path, "test_key", cash_fetcher=fake_cash_fetcher)
+        c = TestClient(app)
+        c.post("/api/refresh")
+        for _ in range(200):
+            if not c.get("/api/status").json()["running"]:
+                break
+            time.sleep(0.05)
+    finally:
+        server_mod.seats_client.fetch_awards = real
+    assert seen.get("sources") == "aeroplan"
