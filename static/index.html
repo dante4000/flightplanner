@@ -46,6 +46,7 @@
   }
   button:disabled { opacity: .5; cursor: default; }
   button.ghost { background: transparent; color: var(--ink-2); border: 1px solid var(--grid); }
+  button.tight { padding: 4px 9px; line-height: 1; font-size: 15px; }
   .tabs { display: flex; gap: 6px; margin: 8px 0 12px; }
   .tabs button.active { outline: 2px solid var(--accent); }
   .card {
@@ -121,8 +122,16 @@
         <input id="c_min_nights_second" type="number" style="width:56px">
       </span>
     </label>
+    <label>Flex dates
+      <span style="display:flex;gap:4px;align-items:center">
+        <button class="ghost tight" id="narrow" title="Tighten the outbound window and pull the deadlines in">−</button>
+        <input id="c_flex_days" type="number" min="1" max="30" value="3" style="width:52px">
+        <button class="ghost tight" id="widen" title="Widen the outbound window and push the deadlines out">+</button>
+      </span>
+    </label>
     <button class="ghost" id="saveCfg">Apply</button>
   </div>
+  <div class="note" id="flexNote"></div>
 
   <h2>Ranked strategies</h2>
   <div class="tabs" id="tabs">
@@ -160,7 +169,7 @@ async function loadConfig() {
   }
 }
 
-$("#saveCfg").onclick = async () => {
+async function applyConfig() {
   const patch = {};
   for (const k of ["outbound_start","outbound_end","return_a_deadline","return_b_deadline"])
     patch[k] = $("#c_" + k).value;
@@ -169,7 +178,40 @@ $("#saveCfg").onclick = async () => {
   await api("/api/config", {method: "PUT", headers: {"content-type": "application/json"},
                             body: JSON.stringify(patch)});
   await loadResults();
+}
+
+$("#saveCfg").onclick = applyConfig;
+
+// UTC arithmetic on purpose: local-time parsing shifts the day for anyone east of UTC.
+const shiftDate = (iso, days) => {
+  const d = new Date(iso + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
 };
+
+// Flex: widen/tighten the outbound window and move the return deadlines with it.
+// The date fields update in place, so nothing is hidden — what you see is what runs.
+async function flex(sign) {
+  const n = Math.max(1, Number($("#c_flex_days").value) || 1) * sign;
+  const start = shiftDate($("#c_outbound_start").value, -n);
+  const end = shiftDate($("#c_outbound_end").value, n);
+  if (start > end) {
+    $("#flexNote").textContent = "Can't tighten further — the outbound window would invert.";
+    return;
+  }
+  $("#c_outbound_start").value = start;
+  $("#c_outbound_end").value = end;
+  for (const k of ["return_a_deadline", "return_b_deadline"])
+    $("#c_" + k).value = shiftDate($("#c_" + k).value, n);
+  await applyConfig();
+  const miss = RESULTS?.missing_cash || 0;
+  $("#flexNote").textContent =
+    `Outbound ${start} → ${end}; deadlines moved ${n > 0 ? "+" : ""}${n} days.` +
+    (miss ? ` ${miss} cash quotes not yet fetched for this range — hit Refresh data.` : "");
+}
+
+$("#widen").onclick = () => flex(1);
+$("#narrow").onclick = () => flex(-1);
 
 $("#tabs").onclick = (e) => {
   const b = e.target.closest("button"); if (!b) return;
