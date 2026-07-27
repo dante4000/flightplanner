@@ -13,6 +13,7 @@ dependencies = [
 
 [project.scripts]
 award-trip-planner = "award_trip_planner.__main__:main"
+atp-solve = "award_trip_planner.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]
